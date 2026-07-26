@@ -1,0 +1,42 @@
+# --- secrets -------------------------------------------------------------
+.env
+.env.*
+!.env.example
+apis.md
+*.pem
+*.key
+service-account*.json
+google-credentials*.json
+
+# --- python --------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+/build/
+/dist/
+.venv/
+venv/
+env/
+
+# --- widget (Phase 5) ------------------------------------------------------
+# node_modules is dev-only; widget.js + .buildhash ARE committed (the whole
+# point of the build-hash guard in tests/test_widget_bundle.py) — everything
+# else vite might drop in dist/ (sourcemaps etc) is not.
+node_modules/
+widget/dist/*
+!widget/dist/widget.js
+!widget/dist/.buildhash
+
+# --- tooling -------------------------------------------------------------
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# --- editors / os --------------------------------------------------------
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

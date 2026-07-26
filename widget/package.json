@@ -1,0 +1,20 @@
+{
+  "name": "ai-receptionist-widget",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Embeddable chat widget — POST /chat/session + /chat SSE, bundled as a single dependency-free <script> tag.",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build && node scripts/buildhash.mjs",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "preact": "^10.24.3"
+  },
+  "devDependencies": {
+    "@preact/preset-vite": "^2.9.3",
+    "typescript": "^5.7.2",
+    "vite": "^5.4.11"
+  }
+}

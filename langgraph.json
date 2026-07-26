@@ -1,0 +1,7 @@
+{
+  "dependencies": ["."],
+  "graphs": {
+    "receptionist": "./app/brain/graph.py:studio_graph"
+  },
+  "env": ".env"
+}

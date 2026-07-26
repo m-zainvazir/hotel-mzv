@@ -1,0 +1,87 @@
+{
+  "tenant_id": "northside-plumbing",
+  "name": "Northside Plumbing",
+  "trade": "plumber",
+  "timezone": "America/Chicago",
+  "status": "active",
+  "phone_numbers": ["+15559870000"],
+  "widget_keys": ["pk_widget_northside_demo"],
+  "greeting": "Northside Plumbing, this is Sam — what's going on?",
+  "persona": "Calm, no-nonsense, gets to the point fast. Reassures people whose house is currently getting wet.",
+  "hours": {
+    "monday": { "open": "07:00", "close": "16:00" },
+    "tuesday": { "open": "07:00", "close": "16:00" },
+    "wednesday": { "open": "07:00", "close": "16:00" },
+    "thursday": { "open": "07:00", "close": "16:00" },
+    "friday": { "open": "07:00", "close": "15:00" },
+    "saturday": null,
+    "sunday": null
+  },
+  "services": [
+    {
+      "slug": "drain-clearing",
+      "name": "Drain clearing",
+      "description": "Clear a blocked sink, shower or main drain line.",
+      "duration_minutes": 90,
+      "price_usd": 180.0,
+      "aliases": ["blocked drain", "clog", "slow drain", "backed up"]
+    },
+    {
+      "slug": "water-heater-service",
+      "name": "Water heater service",
+      "description": "Service, repair or replace a water heater.",
+      "duration_minutes": 150,
+      "price_usd": 420.0,
+      "aliases": ["hot water", "no hot water", "boiler", "water heater"]
+    },
+    {
+      "slug": "leak-repair",
+      "name": "Leak repair",
+      "description": "Trace and repair a leaking pipe or fitting.",
+      "duration_minutes": 120,
+      "price_usd": 260.0,
+      "aliases": ["leak", "dripping", "leaking pipe"]
+    }
+  ],
+  "emergency": {
+    "escalation_phone": "+15559870911",
+    "keywords": [
+      "gas leak",
+      "smell gas",
+      "burst pipe",
+      "flooding",
+      "flooded",
+      "sewage",
+      "water everywhere",
+      "can'?t shut off",
+      "ceiling.*(water|collaps)"
+    ],
+    "holding_message": "Okay — if you can, shut off the main valve. I'm getting our on-call plumber on the line right now.",
+    "alert_template": "EMERGENCY at Northside Plumbing — {customer_name} ({customer_phone}): {reason}. Caller is on the line now."
+  },
+  "booking": {
+    "provider": "stub",
+    "slot_granularity_minutes": 60,
+    "lead_time_hours": 3,
+    "horizon_days": 7,
+    "max_slots_returned": 3
+  },
+  "notifications": {
+    "provider": "stub",
+    "from_number": "+15559870000",
+    "confirmation_template": "Northside Plumbing: booked — {service} on {when} at {address}. Text back to change it."
+  },
+  "voice": {
+    "provider": "cartesia",
+    "voice_id": null,
+    "model": "sonic-2",
+    "speed": 1.0
+  },
+  "vapi": {
+    "assistant_id": null,
+    "phone_number_id": null,
+    "max_duration_seconds": 600,
+    "silence_timeout_seconds": 20
+  },
+  "mcp_servers": []
+}

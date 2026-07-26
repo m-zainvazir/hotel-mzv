@@ -1,0 +1,39 @@
+{
+  "_comment": "Shape verified against Vapi's reference implementation (VapiAI/example-custom-llm, app/types/vapi.py). Credentials Vapi embeds in `phoneNumber` are redacted here and must stay redacted — see app/channels/vapi_schema.py:redacted.",
+  "model": "ai-receptionist",
+  "stream": true,
+  "temperature": 0.2,
+  "max_tokens": 250,
+  "messages": [
+    { "role": "system", "content": "You are a voice assistant configured in Vapi." },
+    { "role": "assistant", "content": "Thanks for calling Hotel_MZV, this is Robin. How can I help you today?" },
+    { "role": "user", "content": "I'd like to book a room for tonight" }
+  ],
+  "tools": [],
+  "call": {
+    "id": "b1f0c1e2-3a4b-4c5d-8e9f-0a1b2c3d4e5f",
+    "orgId": "org_test",
+    "createdAt": "2026-07-21T12:00:00.000Z",
+    "updatedAt": "2026-07-21T12:00:00.000Z",
+    "type": "inboundPhoneCall",
+    "status": "in-progress",
+    "assistantId": "asst_hotelmzv_test",
+    "customer": { "number": "+15557654321" },
+    "phoneNumberId": "pn_test",
+    "phoneCallProvider": "twilio",
+    "phoneCallTransport": "pstn"
+  },
+  "phoneNumber": {
+    "id": "pn_test",
+    "orgId": "org_test",
+    "number": "+15551230000",
+    "createdAt": "2026-07-21T11:00:00.000Z",
+    "updatedAt": "2026-07-21T11:00:00.000Z",
+    "twilioAccountSid": "***",
+    "twilioAuthToken": "***",
+    "name": "Hotel_MZV main line",
+    "provider": "twilio"
+  },
+  "customer": { "number": "+15557654321" },
+  "metadata": {}
+}

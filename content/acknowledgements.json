@@ -1,0 +1,28 @@
+{
+  "_comment": "Short lines the bot says WHILE a tool runs, so the caller never hears silence. One is picked at random. Edit freely; keep them short and natural. 'default' is used for any tool without its own list. A '<tool>.<channel>' key (e.g. 'escalate.voice') is tried before the bare '<tool>' key — use it when a line is only true on one channel, like promising a transfer that only voice can perform.",
+  "check_availability": [
+    "Let me check what we've got open.",
+    "One second, I'll look at the diary.",
+    "Sure — checking availability now."
+  ],
+  "book_job": [
+    "Great, booking that in for you now.",
+    "Perfect — putting that in the diary."
+  ],
+  "send_confirmation": [
+    "Sending that confirmation over now.",
+    "I'll text you the details."
+  ],
+  "escalate": [
+    "Hold on, I'm getting someone on this right now.",
+    "One moment — alerting our on-call team."
+  ],
+  "escalate.voice": [
+    "Hold on, I'm getting someone for you right now.",
+    "Stay with me — putting you through now."
+  ],
+  "default": [
+    "One moment.",
+    "Bear with me a second."
+  ]
+}

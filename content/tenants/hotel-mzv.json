@@ -1,0 +1,186 @@
+{
+  "tenant_id": "hotel-mzv",
+  "name": "Hotel_MZV",
+  "trade": "hotel",
+  "timezone": "America/New_York",
+  "status": "active",
+  "phone_numbers": [
+    "+15551230000"
+  ],
+  "widget_keys": [
+    "pk_widget_hotelmzv_demo"
+  ],
+  "greeting": "Thanks for calling Hotel_MZV, this is Robin. How can I help you today?",
+  "persona": "Warm, composed and genuinely hospitable. Sounds like a senior front-desk manager who has looked after thousands of guests. Never uses jargon unless the caller does first.",
+  "hours": {
+    "monday": {
+      "open": "07:00",
+      "close": "22:00"
+    },
+    "tuesday": {
+      "open": "07:00",
+      "close": "22:00"
+    },
+    "wednesday": {
+      "open": "07:00",
+      "close": "22:00"
+    },
+    "thursday": {
+      "open": "07:00",
+      "close": "22:00"
+    },
+    "friday": {
+      "open": "07:00",
+      "close": "22:00"
+    },
+    "saturday": {
+      "open": "07:00",
+      "close": "22:00"
+    },
+    "sunday": {
+      "open": "07:00",
+      "close": "22:00"
+    }
+  },
+  "services": [
+    {
+      "slug": "room-reservation",
+      "name": "Room reservation",
+      "description": "Book a room for the guest's stay.",
+      "duration_minutes": 30,
+      "price_usd": null,
+      "aliases": [
+        "book a room",
+        "reservation",
+        "stay",
+        "vacancy",
+        "double room",
+        "suite",
+        "overnight"
+      ]
+    },
+    {
+      "slug": "restaurant-table",
+      "name": "Restaurant table",
+      "description": "Reserve a table at the hotel restaurant.",
+      "duration_minutes": 90,
+      "price_usd": null,
+      "aliases": [
+        "table",
+        "dinner",
+        "lunch",
+        "restaurant",
+        "book a table"
+      ]
+    },
+    {
+      "slug": "spa-treatment",
+      "name": "Spa treatment",
+      "description": "Book a massage, facial or other spa service.",
+      "duration_minutes": 60,
+      "price_usd": 120.0,
+      "aliases": [
+        "massage",
+        "spa",
+        "facial",
+        "treatment",
+        "sauna"
+      ]
+    },
+    {
+      "slug": "event-space",
+      "name": "Event space",
+      "description": "Reserve the function room for a private event.",
+      "duration_minutes": 240,
+      "price_usd": 800.0,
+      "aliases": [
+        "conference",
+        "function room",
+        "wedding",
+        "banquet",
+        "event",
+        "private dining"
+      ]
+    },
+    {
+      "slug": "airport-transfer",
+      "name": "Airport transfer",
+      "description": "Arrange a car to or from the airport.",
+      "duration_minutes": 60,
+      "price_usd": 75.0,
+      "aliases": [
+        "pickup",
+        "shuttle",
+        "taxi",
+        "airport",
+        "car to the airport"
+      ]
+    },
+    {
+      "slug": "urgent-assistance",
+      "name": "Urgent assistance",
+      "description": "Same-day response for a guest who needs help right now.",
+      "duration_minutes": 15,
+      "emergency": true,
+      "aliases": [
+        "urgent",
+        "emergency",
+        "right now",
+        "asap"
+      ]
+    }
+  ],
+  "emergency": {
+    "escalation_phone": "+15551230911",
+    "allow_warm_transfer": true,
+    "keywords": [
+      "fire",
+      "smoke",
+      "burning smell",
+      "medical emergency",
+      "ambulance",
+      "chest pain",
+      "not breathing",
+      "unconscious",
+      "collapsed",
+      "choking",
+      "overdose",
+      "bleeding",
+      "intruder",
+      "break.?in",
+      "assault",
+      "stuck in the (lift|elevator)",
+      "carbon monoxide",
+      "gas leak"
+    ],
+    "holding_message": "That sounds serious — please stay where you are and keep away from any danger. I'm getting our duty manager on the line right now.",
+    "alert_template": "EMERGENCY at Hotel_MZV — {customer_name} ({customer_phone}): {reason}. Guest is on the line now."
+  },
+  "booking": {
+    "provider": "calcom",
+    "event_type_id": 6446177,
+    "require_address": false,
+    "slot_granularity_minutes": 30,
+    "lead_time_hours": 2,
+    "horizon_days": 10,
+    "max_slots_returned": 3
+  },
+  "notifications": {
+    "provider": "stub",
+    "from_number": "+15551230000",
+    "confirmation_template": "Hotel_MZV: you're booked for {service} on {when}. Reply here if anything changes."
+  },
+  "voice": {
+    "provider": "cartesia",
+    "voice_id": null,
+    "model": "sonic-2",
+    "speed": 1.0
+  },
+  "vapi": {
+    "assistant_id": "bbc30129-3dc2-45c8-a1e9-56bc7d606cf9",
+    "phone_number_id": null,
+    "max_duration_seconds": 600,
+    "silence_timeout_seconds": 20
+  },
+  "mcp_servers": []
+}
