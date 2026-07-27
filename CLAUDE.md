@@ -81,6 +81,14 @@ WhatsApp sender and the same client go-ahead SMS itself is waiting on.
   Re-run after any `widget/src` edit; `tests/test_widget_bundle.py` fails if you forget.
 - Tests: `pytest` — runs without any API key (scripted chat model in `tests/conftest.py`)
 - Lint/format: `ruff check .` and `ruff format .`
+- Build the deploy image: `docker build -f infra/Dockerfile .` (from the repo root — every
+  `COPY` path is root-relative). Regenerate the lockfile after any `pyproject.toml` dependency
+  change: `docker build -f infra/Dockerfile --target deps -t air-deps .` then
+  `docker run --rm air-deps pip freeze | grep -vi '^ai[-_]receptionist' > infra/requirements.lock.txt`
+  — must run inside the Linux image, never `pip freeze` from the Windows dev `.venv` (see
+  `infra/README.md`).
+- Load/latency test: `python -m scripts.loadtest --base-url <url> --endpoint chat|voice
+  --concurrency <n> --turns <n> --scenario question|booking|emergency`
 
 ## Current state
 **Phases 1–2 done. Phase 3 booking is live; SMS/warm-transfer are code-complete but
@@ -260,8 +268,40 @@ parked until the client revisits that decision. Phase 4's own deferred items (a 
 real Cal.com account to prove cross-tenant booking end-to-end, the actual voice clone,
 the tenant read-path flip), Phase 5's and Phase 6's own (`plans/phase10.md`: WhatsApp,
 per-key rate limiting once a usage-tier model exists, a concrete search/scraper MCP
-server once a key exists) can land opportunistically whenever those inputs arrive. Then
-Phase 7 (Deploy) per plan §15.
+server once a key exists) can land opportunistically whenever those inputs arrive.
+
+**Phase 7 (Deploy + harden) is code-complete and offline-tested — see `plans/phase7.md`
+(the full plan) and `infra/README.md` (the runbook). Not yet deployed anywhere.** In
+order: a hardened multi-stage `infra/Dockerfile` now installs the extras production
+actually needs (`postgres`, `mcp`, `google`) from a lockfile generated inside the Linux
+image (`infra/requirements.lock.txt`, committed) instead of a bare `pip install .` with
+none of them — the deployed image previously could use neither the durable checkpointer,
+MCP tools, nor `LLM_PROVIDER=google`, invisible until someone actually ran the container.
+`app/preflight.py` now fails the boot loudly, all at once, under `APP_ENV=production` if
+`API_AUTH_TOKEN`/`VAPI_WEBHOOK_SECRET`/`WIDGET_SESSION_SECRET`/`PUBLIC_BASE_URL`/
+`SUPABASE_JWT_SECRET`/an LLM provider key is missing — every one of those used to fail
+*open* with no tie to `APP_ENV` at all. `/health` can now report `"degraded"` with a
+`problems[]` list (checkpointer silently fell back to memory, widget bundle missing, MCP
+unavailable) and moves `env`/`llm_provider`/`model`/the full tenant roster/`tracing`
+behind the same `API_AUTH_TOKEN` bearer `/chat`'s trusted path uses; a new `GET /readyz`
+actually touches the database, closing a hole in the original keep-alive plan (`/health`
+alone never would have prevented a free Supabase project pausing after 7 idle days).
+Structured JSON logs + request-id correlation (`app/middleware.py`) are real now, and two
+PII leaks are fixed (an SMS body logged at INFO, a checkpointer failure log that could
+have embedded `DATABASE_URL`'s password). `app/channels/ratelimit.py` adds in-process,
+per-replica rate limiting on `/chat` and `/chat/session` (widget-token callers only — a
+trusted caller is exempt, same as the Vapi routes). `LANGCHAIN_TRACING_V2` et al. are now
+real `Settings` fields exported into `os.environ` by `lifespan` — see the gotcha below for
+why they were silently inert before. `.github/workflows/ci.yml` and `keepalive.yml` exist for
+the first time. `scripts/loadtest.py` drives `/chat` and `/chat/completions` over real
+HTTP against a running server and reports p50/p95/p99 latency. **Still needed, and
+blocked on live account decisions, not code:** a go/no-go on re-creating the Supabase
+project in a US region (the app must be US-based to stay near Groq/Vapi; a
+different-region Supabase adds a real per-turn round trip to the checkpointer's
+cold-thread read — see the plan's "region trade-off" note for the full accounting), then
+the actual Railway deploy and a `provision_vapi` re-run against the live URL (**in that
+order** — provisioning after deploying means the running image's tenant JSON has no
+assistant id yet, and tenant resolution silently falls through).
 
 ## Gotchas learned the hard way
 - **Groq leaks tool calls into text.** Llama 3.3 sometimes writes
@@ -490,3 +530,30 @@ Phase 7 (Deploy) per plan §15.
   in an autouse fixture that runs before that path could safely point at Supabase.
   Adding a server to a live `MCP_SOURCE=supabase` tenant is one row insert
   (`scripts/register_mcp_server.py`) — no redeploy, unlike every other tenant-config edit.
+- **`LANGCHAIN_TRACING_V2`/`LANGCHAIN_API_KEY`/`LANGCHAIN_PROJECT` were in `.env.example`
+  since Phase 1 and did nothing under uvicorn until Phase 7.** They were never real
+  `Settings` fields (`extra="ignore"` swallowed them), and nothing in the repo calls
+  `load_dotenv()` — so pydantic-settings read `.env` without exporting to `os.environ`,
+  and LangChain's tracer reads `os.environ`, not `Settings`. It happened to work under
+  `langgraph dev` (which loads `.env` itself via `langgraph.json`), which is exactly why
+  this went unnoticed for six phases. Now real fields, exported into `os.environ` in
+  `app/main.py`'s `lifespan` before `get_graph()` is built.
+- **`infra/Dockerfile`'s `$PORT` handling needs `sh -c ... exec`, not a plain `CMD` array.**
+  Railway injects `$PORT` at runtime, which a JSON-array `CMD` never expands (it's not a
+  shell). `sh -c "exec uvicorn ... --port ${PORT:-8000}"` gets the expansion; the `exec` is
+  load-bearing too — without it, `sh` stays PID 1 and forwards nothing, so a redeploy's
+  SIGTERM never reaches uvicorn and `--timeout-graceful-shutdown` never gets a chance to
+  drain an in-flight SSE stream.
+- **One worker, one replica is a hard constraint on this codebase, not a conservative
+  default.** `app/brain/metrics.py`'s `TurnCounter`, `app/channels/widget_auth.py`'s
+  per-process fallback session secret, and `app/channels/ratelimit.py`'s rate limiter are
+  all process-local state with zero cross-process coordination. A second worker or replica
+  doesn't crash anything — it just makes the rate limiter quietly too permissive and lets
+  widget sessions signed by one process fail verification on another. Silent and in the
+  dangerous direction, which is worse than a crash.
+- **Provision Vapi *before* deploying, never after.** `scripts/provision_vapi.py` writes
+  `vapi.assistant_id` into the tenant's committed JSON, and `infra/Dockerfile` bakes
+  `content/` into the image at build time. Deploy first and the running image's tenant
+  JSON has no assistant id yet — `resolve_tenant_id`'s `find_by_assistant_id` misses
+  silently, and the caller hears the greeting (spoken by TTS with no LLM round trip) and
+  then silence on every subsequent turn, while `/health` stays green throughout.

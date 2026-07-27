@@ -4,7 +4,8 @@ One LangGraph brain, two channels (phone + chat), many tenants. Full spec in
 [`AI-Receptionist-Build-Plan.md`](AI-Receptionist-Build-Plan.md); conventions in
 [`CLAUDE.md`](CLAUDE.md).
 
-**Status: Phases 1–6 complete.** The brain runs on Groq/Gemini with the five
+**Status: Phases 1–6 complete; Phase 7 (Deploy + harden) code-complete,
+not yet deployed.** The brain runs on Groq/Gemini with the five
 native tools wired, and is reachable by typed chat, an embeddable chat
 widget, *and* by voice through Vapi's Custom-LLM mode. `hotel-mzv` books real
 appointments against a live Cal.com calendar. Supabase now backs storage
@@ -113,6 +114,8 @@ Phase 4's cloned voice drops into the same field.
 | Run the demo MCP server | `pip install -e ".[mcp]"` then `python -m scripts.demo_mcp_server --port 8765` |
 | Connect an MCP server to a tenant | `python -m scripts.register_mcp_server --tenant <id> --name <n> --url <url> [--secret <key>] [--list\|--disable\|--remove\|--dry-run]` |
 | LangGraph Studio | `pip install -e ".[studio]"` then `langgraph dev` (see `langgraph.json`) |
+| Load/latency test | `python -m scripts.loadtest --base-url <url> --endpoint chat\|voice --concurrency <n> --turns <n> --scenario question\|booking\|emergency` (see `infra/README.md`) |
+| Build the deploy image | `docker build -f infra/Dockerfile .` (see `infra/README.md`) |
 | Tests | `pytest` |
 | Lint / format | `ruff check .` · `ruff format .` |
 
@@ -269,8 +272,20 @@ second example tenant.
 | MCP: any tenant can connect HTTP MCP servers (registry, secret substitution, per-server timeouts, tenant-scoped caching) — proven against a first-party demo server (`scripts/demo_mcp_server.py`) | A concrete third-party search/scraper server (Tavily/Firecrawl/Exa) — the config path is generic and vendor-neutral, just needs a key; `mcp_servers` (`app/db/migrations/0007_mcp.sql`) not yet applied to a live project either |
 
 See `plans/phase4.md`, `plans/phase5.md` and `plans/phase6.md` for the full
-implementation records and live-verification checklists. Phase 7 (Deploy) is
-next per §15 of the plan.
+implementation records and live-verification checklists.
+
+## Deploy (Phase 7)
+
+`plans/phase7.md` is the full plan; `infra/README.md` is the runbook. Code
+is done and offline-tested (production preflight, `/health`/`/readyz`,
+structured logs + request ids, rate limiting, real LangSmith tracing, a
+hardened multi-stage Dockerfile with a pinned lockfile, CI + keep-alive
+workflows, and a load/latency harness). Not yet done: the actual Railway
+deploy, re-provisioning Vapi against the live URL, and applying
+`0006_chat.sql`/`0007_mcp.sql` (plus a decision on re-creating the Supabase
+project in a US region to avoid the cross-region checkpointer latency —
+see the plan's "region trade-off" note) — all of which need a live account
+decision, not more code.
 
 ## Security
 
