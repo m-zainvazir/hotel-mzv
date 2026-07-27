@@ -201,7 +201,70 @@ def test_health_reports_widget_missing_when_the_bundle_is_absent(client, monkeyp
     import app.main as main_module
 
     monkeypatch.setattr(main_module, "WIDGET_BUNDLE_PATH", tmp_path / "does-not-exist.js")
-    assert client.get("/health").json()["widget"] == "missing"
+    body = client.get("/health").json()
+    assert body["widget"] == "missing"
+    assert body["status"] == "degraded"
+    assert "widget bundle not built" in body["problems"]
+
+
+def test_health_is_ok_with_no_problems_by_default(client):
+    body = client.get("/health").json()
+    assert body["status"] == "ok"
+    assert body["problems"] == []
+
+
+def test_health_detail_is_open_when_no_api_auth_token_is_configured(client):
+    """Dev default: no API_AUTH_TOKEN means every caller sees the detail
+    (Phase 7 Step 4) — same fail-open-when-unconfigured convention as
+    app/channels/security.py."""
+    assert get_settings().api_auth_token is None
+    body = client.get("/health").json()
+    assert "tenants" in body
+    assert "llm_provider" in body
+
+
+def test_health_detail_requires_the_bearer_once_a_token_is_configured(client, monkeypatch):
+    monkeypatch.setenv("API_AUTH_TOKEN", "s3cret")
+    reset_settings_cache()
+    try:
+        anonymous = client.get("/health").json()
+        assert "tenants" not in anonymous
+        assert "llm_provider" not in anonymous
+        assert "env" not in anonymous
+        assert "model" not in anonymous
+        # Still 200 and still reports the operational fields -- a health
+        # checker with no Authorization header must never see a failure.
+        assert anonymous["status"] == "ok"
+
+        authed = client.get("/health", headers={"Authorization": "Bearer s3cret"}).json()
+        assert "hotel-mzv" in authed["tenants"]
+    finally:
+        reset_settings_cache()
+
+
+def test_readyz_reports_ready_on_the_memory_store(client):
+    assert get_settings().supabase_url is None
+    body = client.get("/readyz").json()
+    assert body == {"ready": True, "store": "memory"}
+
+
+def test_readyz_503s_when_supabase_is_unreachable(client, monkeypatch):
+    from app.db.factory import reset_store_cache
+    from app.db.supabase_store import SupabaseStore, SupabaseStoreError
+
+    monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
+    reset_settings_cache()
+
+    async def _boom(self, tenant_id, **kwargs):
+        raise SupabaseStoreError("boom")
+
+    monkeypatch.setattr(SupabaseStore, "alist_jobs", _boom)
+    try:
+        response = client.get("/readyz")
+        assert response.status_code == 503
+    finally:
+        reset_settings_cache()
+        reset_store_cache()
 
 
 def test_cors_preflight_allows_a_cross_origin_chat_call(client):

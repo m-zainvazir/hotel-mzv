@@ -10,7 +10,7 @@ import asyncio
 import sys
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
@@ -66,9 +66,11 @@ if sys.platform == "win32":
 from app import __version__
 from app.brain.graph import active_checkpointer_name, get_graph, init_postgres_checkpointer
 from app.channels import chat, vapi_llm, webhooks
+from app.channels.security import is_ops_caller
 from app.config import REPO_ROOT, get_settings
 from app.db.checkpointer import close_postgres_pool
 from app.db.factory import get_store
+from app.db.supabase_store import SupabaseStoreError
 from app.logging_config import configure_logging
 from app.preflight import verify_production_settings
 from app.tenancy.loader import get_repository
@@ -165,23 +167,67 @@ async def widget_demo() -> FileResponse:
 
 
 @app.get("/health", tags=["ops"])
-async def health() -> dict:
+async def health(authenticated: bool = Depends(is_ops_caller)) -> dict:
     settings = get_settings()
-    return {
-        "status": "ok",
-        "version": __version__,
-        "env": settings.app_env,
-        "llm_provider": settings.llm_provider,
-        "model": settings.active_model,
-        "tenants": get_repository().list_ids(),
-        "store": "supabase" if settings.supabase_url else "memory",
-        "checkpointer": active_checkpointer_name(),
+    checkpointer = active_checkpointer_name()
+    widget_built = WIDGET_BUNDLE_PATH.is_file()
+    mcp_status = _mcp_health(settings)
+
+    problems: list[str] = []
+    if settings.database_url and checkpointer == "memory":
+        # The only signal a bad/unreachable DATABASE_URL silently cost
+        # durability — app/brain/graph.py degrades to InMemorySaver with
+        # just a WARNING log line, never a crashed boot (Phase 4).
+        problems.append("DATABASE_URL is set but the checkpointer fell back to memory")
+    if not widget_built:
         # A deploy that forgot `npm run build` (or the Dockerfile's
         # `COPY widget/dist ...`) is one curl away from visible instead of a
         # 404 the first time a client's site tries to load the widget.
-        "widget": "built" if WIDGET_BUNDLE_PATH.is_file() else "missing",
-        "mcp": _mcp_health(settings),
+        problems.append("widget bundle not built")
+    if mcp_status == "unavailable":
+        problems.append("mcp is enabled but langchain-mcp-adapters is not installed")
+
+    body: dict = {
+        "status": "degraded" if problems else "ok",
+        "version": __version__,
+        "store": "supabase" if settings.supabase_url else "memory",
+        "checkpointer": checkpointer,
+        "widget": "built" if widget_built else "missing",
+        "mcp": mcp_status,
+        "problems": problems,
     }
+    # env / llm_provider / model / the full tenant roster are operational
+    # detail, not something an anonymous caller needs — moved behind the
+    # same API_AUTH_TOKEN bearer POST /chat's trusted path uses (Phase 7
+    # Step 4). is_ops_caller() always returns True when no token is
+    # configured, matching the dev-default fail-open convention elsewhere.
+    if authenticated:
+        body["env"] = settings.app_env
+        body["llm_provider"] = settings.llm_provider
+        body["model"] = settings.active_model
+        body["tenants"] = get_repository().list_ids()
+    return body
+
+
+@app.get("/readyz", tags=["ops"])
+async def readyz() -> dict:
+    """Unlike `/health`, this actually touches the database — Railway (or a
+    keep-alive cron, Phase 7 Step 8) polling `/health` alone would never
+    have stopped a free Supabase project pausing after 7 idle days, since
+    no query ever left the app on that path. Kept off `/health` itself so
+    Railway's frequent healthcheck polling doesn't pay a round trip to the
+    database every time.
+    """
+    settings = get_settings()
+    if not settings.supabase_url:
+        return {"ready": True, "store": "memory"}
+
+    store = get_store()
+    try:
+        await store.alist_jobs(settings.default_tenant_id)
+    except SupabaseStoreError as exc:
+        raise HTTPException(status_code=503, detail=f"database unreachable: {exc}") from exc
+    return {"ready": True, "store": "supabase"}
 
 
 def _mcp_health(settings) -> str:

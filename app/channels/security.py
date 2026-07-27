@@ -4,7 +4,7 @@ Every public endpoint runs the brain, which costs money and can send SMS — so
 each is gated by a shared secret whenever one is configured. Development with
 no secret set stays open for convenience.
 
-Three schemes, because three kinds of caller:
+Four schemes, because four kinds of caller:
   * `require_chat_caller` — `POST /chat` accepts either a widget session token
     (minted by `POST /chat/session`, public) or the shared `API_AUTH_TOKEN`
     bearer (server-to-server: `chat_cli`, tests, another backend). Which one
@@ -13,6 +13,9 @@ Three schemes, because three kinds of caller:
   * `require_vapi_secret` — Vapi's own scheme, which is either a plain shared
     secret header or an HMAC over the raw body depending on how the assistant's
     `server` block is set up. We accept both rather than guess.
+  * `is_ops_caller` — `GET /health`'s detail fields (Phase 7 Step 4). Unlike
+    the other three, it never raises: a health check must always get a 200,
+    just with less detail without the right bearer.
 """
 
 from __future__ import annotations
@@ -67,6 +70,27 @@ async def require_chat_caller(authorization: str | None = Header(default=None)) 
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="invalid or missing bearer token",
     )
+
+
+def is_ops_caller(authorization: str | None = Header(default=None)) -> bool:
+    """Whether `GET /health` should include its authenticated detail fields
+    (`env`, `llm_provider`, `model`, the full `tenants` list — Phase 7 Step 4
+    moved these behind auth; a `/health` scraped from outside the org
+    shouldn't hand over the tenant roster and stack details for free).
+
+    Same `API_AUTH_TOKEN` bearer as `require_chat_caller`'s trusted path, but
+    this never raises — a health checker with no `Authorization` header
+    still needs a 200, just a less detailed one. No token configured (the
+    dev default) means every caller sees the detail, matching this module's
+    fail-open-when-unconfigured convention.
+    """
+    expected = get_settings().api_auth_token
+    if not expected:
+        return True
+    if not authorization or not authorization.lower().startswith("bearer "):
+        return False
+    presented = authorization[7:].strip()
+    return hmac.compare_digest(presented, expected)
 
 
 async def require_vapi_secret(
