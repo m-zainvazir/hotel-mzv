@@ -30,7 +30,10 @@ class StubNotifier(Notifier):
         message = OutboundMessage(
             tenant_id=tenant.tenant_id, to=to, body=body, kind=kind, provider=self.name
         )
-        logger.info("[stub-sms] tenant=%s to=%s kind=%s: %s", tenant.tenant_id, to, kind, body)
+        # DEBUG, not INFO: `body` carries the guest's name and appointment
+        # time, and this is the *live* path for every tenant not on Twilio
+        # (Phase 7 Step 5).
+        logger.debug("[stub-sms] tenant=%s to=%s kind=%s: %s", tenant.tenant_id, to, kind, body)
         return await self._store.arecord_message(message)
 
 

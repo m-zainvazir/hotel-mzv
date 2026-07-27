@@ -27,6 +27,10 @@ class Settings(BaseSettings):
     # --- app ---------------------------------------------------------------
     app_env: Literal["development", "staging", "production"] = "development"
     log_level: str = "INFO"
+    #: "json" in production — a structured record per line, correlated by
+    #: request id (app/middleware.py). "text" stays the human-readable
+    #: default for a dev console.
+    log_format: Literal["text", "json"] = "text"
     host: str = "0.0.0.0"
     port: int = 8000
     api_auth_token: str | None = None

@@ -72,9 +72,19 @@ from app.db.checkpointer import close_postgres_pool
 from app.db.factory import get_store
 from app.db.supabase_store import SupabaseStoreError
 from app.logging_config import configure_logging
+from app.middleware import RequestContextMiddleware
 from app.preflight import verify_production_settings
 from app.tenancy.loader import get_repository
 from app.tools.http_client import close_shared_clients
+
+# At import time, not inside `lifespan`: uvicorn's own `Config.configure_logging()`
+# runs before this module is imported and installs its own handlers on
+# `uvicorn`/`uvicorn.access`/`uvicorn.error`, then the "Started server
+# process" / "Uvicorn running on..." lines print in uvicorn's own format.
+# Calling this here — during `Config.load()`'s import of the app — is what
+# lets it take those loggers over before any of uvicorn's *own* startup
+# lines are emitted, not just before this app's. See its docstring.
+configure_logging()
 
 WIDGET_DIST_DIR = REPO_ROOT / "widget" / "dist"
 WIDGET_BUNDLE_PATH = WIDGET_DIST_DIR / "widget.js"
@@ -84,7 +94,6 @@ WIDGET_DEMO_PATH = REPO_ROOT / "widget" / "demo.html"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    configure_logging()
     # Fail loudly and all-at-once at startup, not one silently-open endpoint
     # at a time in production: app/channels/security.py's auth guards and
     # widget_auth's session signing fail *open* when their secret is unset —
@@ -134,6 +143,10 @@ app.add_middleware(
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["authorization", "content-type"],
 )
+# Added after CORS so it's the outermost layer — its access log (and the
+# X-Request-Id it echoes) then covers the whole request, CORS preflight
+# included.
+app.add_middleware(RequestContextMiddleware)
 
 app.include_router(chat.router)
 app.include_router(vapi_llm.router)
