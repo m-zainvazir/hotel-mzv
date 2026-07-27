@@ -8,6 +8,7 @@ the turn blowing up on the caller.
 from __future__ import annotations
 
 import logging
+import time
 from datetime import datetime
 
 from langchain_core.runnables import RunnableConfig
@@ -77,6 +78,7 @@ async def check_availability(
         day_floor = max(day_start, datetime.now(tenant.tz))
 
     provider = get_booking_provider(tenant)
+    started = time.perf_counter()
     try:
         slots = await provider.check_availability(
             tenant, matched, earliest=day_floor, limit=_CANDIDATE_LIMIT
@@ -89,6 +91,15 @@ async def check_availability(
             "ERROR: the calendar is not responding right now. Apologise, and offer to take "
             "the caller's details for a callback instead."
         ), {}
+    # Attributes turn latency between "the model was slow" and "the booking
+    # provider was slow" — Cal.com's own 15s timeout (calcom_timeout_seconds)
+    # is the single largest unmeasured span in a turn otherwise (Phase 7 Step 9).
+    logger.info(
+        "check_availability provider call took %.0fms tenant=%s service=%s",
+        (time.perf_counter() - started) * 1000,
+        tenant.tenant_id,
+        matched.slug,
+    )
 
     if not slots:
         return (
@@ -170,6 +181,7 @@ async def book_job(
         return "ERROR: address is required. Ask the caller where the work is."
 
     provider = get_booking_provider(tenant)
+    started = time.perf_counter()
     try:
         job = await provider.create_booking(
             tenant,
@@ -200,6 +212,13 @@ async def book_job(
             "ERROR: could not complete the booking. Offer a callback instead. "
             "Do NOT say it is booked."
         )
+    # See check_availability's matching log line — same rationale.
+    logger.info(
+        "book_job provider call took %.0fms tenant=%s service=%s",
+        (time.perf_counter() - started) * 1000,
+        tenant.tenant_id,
+        matched.slug,
+    )
 
     logger.info("booked job=%s tenant=%s service=%s", job.id, tenant.tenant_id, job.service_slug)
     where = f" at {job.address}" if job.address else ""
