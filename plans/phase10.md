@@ -90,6 +90,58 @@ covers the design ("optional WhatsApp via Twilio uses the same endpoint").
 and if so, a Twilio WhatsApp sender. Effort: medium — real work, not a flag
 flip (a genuine second entry point into `/chat`).
 
+### 11. A concrete search/scraper MCP server (Phase 6 leftover)
+
+The MCP loader (`app/mcp/`) is vendor-neutral by design — proven against a
+first-party demo server (`scripts/demo_mcp_server.py`) and live-tested
+against a real Tavily connection during Phase 6 development — but no tenant
+has a *committed*, ongoing third-party server. `hotel-mzv`'s Tavily entry so
+far has been a local testing convenience, not a production configuration.
+
+**What's needed:** an API key from Tavily, Firecrawl or Exa (whichever you
+prefer — free tiers exist on all three).
+
+**Then:**
+```
+python -m scripts.register_mcp_server --tenant <id> --name <name> \
+    --url '<vendor url>?apiKey=${secret}' --secret <the real key>
+```
+One command, no code change — see `content/README.md`'s "Connecting any
+remote MCP server" section. Effort: trivial once the key exists.
+
+### 12. Self-serve MCP server registration via a tenant-facing UI (undecided)
+
+Not decided: whether tenants should add their own MCP servers (a CRM, a
+search tool) through a UI, rather than you running
+`scripts/register_mcp_server.py` on their behalf. The storage layer already
+fits this without redesigning it — the `mcp_servers` table's real RLS
+(`tenant_id = auth.jwt() ->> 'tenant_id'`) already enforces "a tenant can
+only touch its own rows" at the database layer, the same pattern
+`app/tenancy/secrets.py`'s `get_tenant_secret` RPC already uses (derives
+`tenant_id` from the caller's own JWT claim, never a parameter) — a
+self-serve UI could sit directly on top of that.
+
+What's actually missing is bigger than a form: there's no tenant-facing
+login at all today, only a shared admin bearer token and anonymous
+per-visitor widget sessions — this needs the Phase 8 admin dashboard's
+authentication surface, not something to build standalone. Two risks are
+specific to *this* feature, not general Phase 8 risk: (1) `set_tenant_secret`
+is deliberately backend-only today, taking `tenant_id` as a parameter
+because only the trusted admin path calls it — a tenant-scoped write variant
+would need to derive `tenant_id` from the JWT the same way the read-side RPC
+already does, or one tenant could plausibly overwrite another's secret; (2) a
+tenant submitting an arbitrary server URL opens SSRF (e.g. a URL pointing at
+`169.254.169.254` or an internal service) — today that risk doesn't exist
+because only a trusted operator ever types these URLs in. Any such UI should
+also hard-remove the `stdio` transport option entirely rather than leaving
+it default-off (`MCP_ALLOW_STDIO`), since a tenant-submitted subprocess
+command is remote code execution, full stop.
+
+**What's needed:** a decision on whether this is worth building at all —
+likely rides along with the Phase 8 admin-dashboard decision rather than
+standing alone. Effort: medium–large — a new tenant-facing auth surface plus
+a new tenant-scoped secret-write RPC, not a form.
+
 ---
 
 ## No external blocker — pick up whenever there's time
