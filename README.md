@@ -4,8 +4,9 @@ One LangGraph brain, two channels (phone + chat), many tenants. Full spec in
 [`AI-Receptionist-Build-Plan.md`](AI-Receptionist-Build-Plan.md); conventions in
 [`CLAUDE.md`](CLAUDE.md).
 
-**Status: Phases 1–6 complete; Phase 7 (Deploy + harden) code-complete,
-not yet deployed.** The brain runs on Groq/Gemini with the five
+**Status: Phases 1–7 complete.** Live on Railway
+(`us-east4`, Docker, one replica), backed by a Supabase project in
+`us-east-1`. The brain runs on Groq/Gemini with the five
 native tools wired, and is reachable by typed chat, an embeddable chat
 widget, *and* by voice through Vapi's Custom-LLM mode. `hotel-mzv` books real
 appointments against a live Cal.com calendar. Supabase now backs storage
@@ -274,18 +275,24 @@ second example tenant.
 See `plans/phase4.md`, `plans/phase5.md` and `plans/phase6.md` for the full
 implementation records and live-verification checklists.
 
-## Deploy (Phase 7)
+## Deploy (Phase 7) — done
 
-`plans/phase7.md` is the full plan; `infra/README.md` is the runbook. Code
-is done and offline-tested (production preflight, `/health`/`/readyz`,
-structured logs + request ids, rate limiting, real LangSmith tracing, a
-hardened multi-stage Dockerfile with a pinned lockfile, CI + keep-alive
-workflows, and a load/latency harness). Not yet done: the actual Railway
-deploy, re-provisioning Vapi against the live URL, and applying
-`0006_chat.sql`/`0007_mcp.sql` (plus a decision on re-creating the Supabase
-project in a US region to avoid the cross-region checkpointer latency —
-see the plan's "region trade-off" note) — all of which need a live account
-decision, not more code.
+`plans/phase7.md` is the full plan; `infra/README.md` is the runbook. Live
+on Railway: Docker builder (`railway.json` → `infra/Dockerfile`), region
+`us-east4`, one replica. Supabase re-created in `us-east-1` (was Asia) —
+Vapi and the active LLM provider are both US-anchored with no region
+selector of their own, so co-locating the app + DB there is the one real
+lever available; all 7 migrations applied, both tenants synced, per-tenant
+Vault secrets restored. `provision_vapi` re-run against the live URL, in
+the required order (domain → secrets → provision → commit → deploy).
+Confirmed live: `/health` (`checkpointer: "postgres"`, `store: "supabase"`,
+`problems: []`), `/readyz`, the deployed webhook secret matching the
+provisioned Vapi assistant, and a real turn against the live assistant id
+returning a correct answer from the real model. hotel-mzv's warm transfer
+is off for now (its escalation number was placeholder `555` data Vapi's
+API rejects as a real destination — one JSON edit + a `provision_vapi`
+re-run once a real number exists). No phone number attached yet (web-call
+only) and Twilio stays parked — both are the client's call.
 
 ## Security
 

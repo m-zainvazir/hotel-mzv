@@ -318,10 +318,37 @@ Vault secret round-trips correctly scoped to `hotel-mzv` only (`northside-plumbi
 correctly gets nothing back). The old Asia project still exists, untouched — deleting it
 is a separate decision, not part of this migration.
 
-**Still needed, and blocked on live account decisions, not code:** the actual Railway
-deploy and a `provision_vapi` re-run against the live URL (**in that order** —
-provisioning after deploying means the running image's tenant JSON has no assistant id
-yet, and tenant resolution silently falls through).
+**Phase 7 is fully done — Step 11 (deploy) completed and live-verified.** Deployed to
+Railway (`ai-receptionist` project, service connected to the GitHub repo for autodeploy,
+region `us-east4`, one replica — matches the single-replica constraint). `railway.json`
+pins the Docker builder to `infra/Dockerfile` and sets `healthcheckPath: /health`, since
+Railway's auto-detection only looks for a root-level Dockerfile otherwise. Order followed
+exactly as planned: domain reserved first
+(`https://ai-receptionist-production-5cb4.up.railway.app`), every secret set as a Railway
+variable (never baked into the image), `provision_vapi --tenant hotel-mzv` re-run against
+that URL from the dev box, the resulting tenant JSON change committed, *then* deployed.
+
+One real snag hit during provisioning, not a secrets issue: **Vapi's API rejects
+`555`-prefixed numbers as a `transferCall` destination** ("must be a valid phone number in
+E.164 format") — `555` is North America's reserved fictional-number exchange, and
+hotel-mzv's `emergency.escalation_phone` (`+15551230911`) was always placeholder dev data,
+same as its main line. `allow_warm_transfer` is now `false` for hotel-mzv until a real
+escalation number exists — flipping it back is a one-field JSON edit + a `provision_vapi`
+re-run, no redeploy needed. This exposed (again) that six tests across
+`test_warm_transfer.py`/`test_native_tools.py`/`test_vapi_llm.py` were asserting on
+hotel-mzv.json's *current* `allow_warm_transfer` value as if it were "the default" —
+fixed properly this time by having every "enabled" test build that explicitly via
+`model_copy` (or the `override_tenant` fixture, for anything that re-resolves the tenant
+through `get_tenant_config` — a bare `model_copy` is invisible to that path). The tenant's
+real config can now change without silently flipping unrelated tests again.
+
+Confirmed live: `/health` shows `checkpointer: "postgres"`, `store: "supabase"`,
+`problems: []` (production preflight passed clean); `/readyz` touches the real database;
+the deployed `VAPI_WEBHOOK_SECRET` matches what's baked into the Vapi assistant (a wrong
+secret 401s, the real one doesn't); and a real `/chat/completions` turn against the live
+assistant id returns a correct, contextual answer from the real Gemini model. No phone
+number is attached yet (Vapi web-call only) and Twilio stays parked — both remain the
+client's call, not blocked on anything technical.
 
 ## Gotchas learned the hard way
 - **Groq leaks tool calls into text.** Llama 3.3 sometimes writes
