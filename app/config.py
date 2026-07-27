@@ -152,7 +152,41 @@ class Settings(BaseSettings):
 
     # --- mcp (Phase 6) -----------------------------------------------------
     mcp_enabled: bool = False
+    #: Per-tool-call ceiling once a session is open. Distinct from
+    #: `mcp_connect_timeout_seconds` below, which bounds only the handshake +
+    #: `get_tools()` — a slow *call* (e.g. a scraper) is a different failure
+    #: mode from a slow *connect*, and conflating them would make a slow tool
+    #: call kill a fast server's connection budget too.
     mcp_tool_timeout_seconds: int = 15
+    #: Bounds `MultiServerMCPClient.get_tools()` per server. One dead
+    #: third-party server must never stall a live call — the whole point of
+    #: loading servers independently in app/mcp/client.py.
+    mcp_connect_timeout_seconds: float = 5.0
+    #: Which tenant repository backs `app/mcp/registry.py`. Stays "json" by
+    #: default (dev + tests read content/tenants/*.json), but — unlike
+    #: `tenant_source` — is safe to flip to "supabase" without a live-verification
+    #: pass of its own: the registry read only ever happens inside
+    #: `load_mcp_tools`, which is already async, already gated on
+    #: `mcp_enabled`, and already degrades to [] on any failure. No autouse
+    #: test fixture touches it at collection time the way
+    #: `get_repository().list_ids()` does for tenant config.
+    mcp_source: Literal["json", "supabase"] = "json"
+    #: A `command` string in tenant config is arbitrary code execution on the
+    #: one box holding every tenant's data, and most hosted deploys can't
+    #: spawn a subprocess anyway. Off by default; an operator opts in
+    #: explicitly for a local stdio server.
+    mcp_allow_stdio: bool = False
+    #: TTL for the per-tenant MCP tool-list cache (app/mcp/client.py). Not
+    #: just a latency knob: `reason` binds this list and the dynamic `tools`
+    #: node (app/brain/nodes/tools.py) executes against it in the same turn —
+    #: without a cache, two independent `get_tools()` calls against a flaky
+    #: server could disagree, and the model would emit a call nothing can run.
+    mcp_tool_cache_ttl_seconds: int = 300
+    #: Hard cap on MCP tools bound per turn. Every bound tool schema is
+    #: re-sent on every request, forever — see README's cost breakdown — so an
+    #: unbounded tenant server list is a direct, compounding token cost on a
+    #: path that's supposed to be the long tail, not the fast one.
+    mcp_max_tools: int = 8
 
     # --- chat widget (Phase 5) ----------------------------------------------
     #: HMAC key signing widget session tokens (`app/channels/widget_auth.py`).

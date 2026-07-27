@@ -8,9 +8,13 @@ braces, not a replacement. These tests must keep passing after that swap.
 from __future__ import annotations
 
 from app.brain.runner import stream_turn
+from app.config import reset_settings_cache
 from app.db.memory_store import get_store
+from app.mcp.client import load_mcp_tools
+from app.tenancy.models import McpServerConfig
 from app.tools.booking_tools import book_job, check_availability
 from app.tools.messaging_tools import escalate, send_confirmation
+from tests._mcp_fakes import make_fake_client
 from tests.conftest import ai, tool_config
 
 
@@ -99,3 +103,29 @@ async def test_tools_see_only_the_tenant_in_their_runnable_config(hotel, northsi
 
     # "drain clearing" is a Northside service; Hotel_MZV must not be able to book it.
     assert "Drain clearing" not in listing
+
+
+async def test_one_tenants_mcp_server_never_reaches_another_tenants_tool_set(
+    hotel, northside, monkeypatch
+):
+    """Convention #3 covers MCP servers explicitly, not just data — a tenant's
+    per-tenant server registry (app/tenancy/models.py's mcp_servers) must
+    never leak a tool into a different tenant's bound set, however that
+    tenant is resolved."""
+    monkeypatch.setenv("MCP_ENABLED", "true")
+    reset_settings_cache()
+    try:
+        FakeClient, _calls = make_fake_client(server_tools={"crm": ["lookup_guest"]})
+        monkeypatch.setattr("langchain_mcp_adapters.client.MultiServerMCPClient", FakeClient)
+
+        hotel_with_server = hotel.model_copy(
+            update={"mcp_servers": [McpServerConfig(name="crm", url="https://example.invalid/crm")]}
+        )
+
+        hotel_tools = await load_mcp_tools(hotel_with_server)
+        northside_tools = await load_mcp_tools(northside)  # no servers configured
+
+        assert {t.name for t in hotel_tools} == {"crm_lookup_guest"}
+        assert northside_tools == []
+    finally:
+        reset_settings_cache()

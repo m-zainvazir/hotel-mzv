@@ -86,6 +86,29 @@ def _service_rows(tenant: TenantConfig) -> list[dict[str, Any]]:
     ]
 
 
+def _mcp_server_rows(tenant: TenantConfig) -> list[dict[str, Any]]:
+    """Phase 6: mirrors `_service_rows` so a JSON-edited server list and the
+    `mcp_servers` table always agree, and `MCP_SOURCE` can be flipped either
+    direction without surprise. Note `headers` here may still contain the
+    literal `${secret}` placeholder — the resolved value only ever exists in
+    Vault, via `set_tenant_secret` (see `scripts/register_mcp_server.py`)."""
+    return [
+        {
+            "tenant_id": tenant.tenant_id,
+            "name": s.name,
+            "enabled": s.enabled,
+            "transport": s.transport,
+            "url": s.url,
+            "headers": s.headers,
+            "tool_allowlist": s.tool_allowlist,
+            "command": s.command,
+            "args": s.args,
+            "auth_secret_ref": s.auth_secret_ref,
+        }
+        for s in tenant.mcp_servers
+    ]
+
+
 async def sync_tenant(tenant: TenantConfig, *, client: httpx.AsyncClient | None = None) -> None:
     """Upsert this tenant's `tenants` row and every `services` row."""
     settings = get_settings()
@@ -115,6 +138,17 @@ async def sync_tenant(tenant: TenantConfig, *, client: httpx.AsyncClient | None 
                 raise TenantSyncError(
                     f"could not sync services: {services_response.status_code} "
                     f"{services_response.text[:300]}"
+                )
+
+        mcp_rows = _mcp_server_rows(tenant)
+        if mcp_rows:
+            mcp_response = await active.post(
+                "/mcp_servers", params={"on_conflict": "tenant_id,name"}, json=mcp_rows
+            )
+            if mcp_response.status_code >= 400:
+                raise TenantSyncError(
+                    f"could not sync mcp_servers: {mcp_response.status_code} "
+                    f"{mcp_response.text[:300]}"
                 )
     finally:
         if owns_client:

@@ -180,18 +180,56 @@ class ChatSettings(BaseModel):
     greeting: str | None = None
 
 
+_MCP_SERVER_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
+
+
 class McpServerConfig(BaseModel):
     """Phase 6 — one MCP server this tenant is allowed to use."""
 
     model_config = ConfigDict(frozen=True)
 
     name: str
+    enabled: bool = True
     transport: Literal["http", "stdio"] = "http"
     url: str | None = None
+    #: May contain literal `${secret}`, substituted from `auth_secret_ref`'s
+    #: vault value at connect time (app/mcp/connections.py) — needed because
+    #: some hosted MCP servers (e.g. Tavily) take their key as a URL query
+    #: parameter, not a header.
+    headers: dict[str, str] = Field(default_factory=dict)
+    #: Empty = every tool the server offers. The per-tenant scalpel against
+    #: `Settings.mcp_max_tools`'s blunt cap.
+    tool_allowlist: list[str] = Field(default_factory=list)
     command: str | None = None
     args: list[str] = Field(default_factory=list)
     # Secret *references* only — resolved from the vault at load time, never inlined.
     auth_secret_ref: str | None = None
+
+    @field_validator("name")
+    @classmethod
+    def _legal_tool_prefix(cls, value: str) -> str:
+        """Load-bearing, not cosmetic: with `tool_name_prefix=True` this name
+        becomes part of every tool name the server offers, and every LLM
+        provider rejects a tool name outside `^[a-zA-Z0-9_-]{1,64}$` by 400ing
+        the *entire request* — not just the MCP call. A server named
+        "my server" would silently break every turn for that tenant,
+        including booking. Fail here, at config load, instead."""
+        if not _MCP_SERVER_NAME_RE.match(value):
+            raise ValueError(
+                f"mcp server name {value!r} must match {_MCP_SERVER_NAME_RE.pattern} "
+                "— it becomes part of every tool name this server offers"
+            )
+        return value
+
+    @model_validator(mode="after")
+    def _transport_has_its_endpoint(self) -> McpServerConfig:
+        """Fail at config load, not mid-call — same reasoning as
+        `TenantConfig._calcom_tenants_declare_event_types`."""
+        if self.transport == "http" and not self.url:
+            raise ValueError(f"mcp server {self.name!r} has transport 'http' but no url")
+        if self.transport == "stdio" and not self.command:
+            raise ValueError(f"mcp server {self.name!r} has transport 'stdio' but no command")
+        return self
 
 
 class TenantConfig(BaseModel):

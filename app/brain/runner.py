@@ -19,7 +19,7 @@ from app.brain.graph import get_graph
 from app.brain.metrics import TurnCounter
 from app.brain.sanitize import InlineToolCallFilter, RepeatSuppressor
 from app.tenancy.loader import resolve_tenant_id
-from app.tools.registry import SLOW_TOOLS
+from app.tools.registry import is_slow_tool
 
 logger = logging.getLogger(__name__)
 
@@ -121,7 +121,7 @@ async def stream_turn(
 
                         for call in _tool_calls(update):
                             name = call.get("name", "")
-                            if not spoke_since_last_tool and name in SLOW_TOOLS:
+                            if not spoke_since_last_tool and is_slow_tool(name):
                                 # Trailing space, or it collides with whatever
                                 # the model says next: "the diary.I'll text you".
                                 ack = acknowledgement_for(name, channel).rstrip() + " "

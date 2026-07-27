@@ -10,6 +10,7 @@ touching code**. Edits take effect on the next message — no restart needed.
 | `tenants/northside-plumbing.json` | A second example business (a plumber). | — |
 | `acknowledgements.json` | The little "one second…" lines said **while a tool runs**, so callers don't hear silence. A `<tool>.<channel>` key (e.g. `escalate.voice`) is tried before the bare `<tool>` key — use it for a line that's only true on one channel. | Reword them, add more |
 | `tenants/<id>.json` → `chat` block | **The widget's own display config** (Phase 5) — `accent_color`, `launcher_label`, `quick_replies` (on/off), an optional widget-specific `greeting` override, and `allowed_origins`. Never reaches the graph; the brain doesn't know a widget exists. | Rebrand the launcher color, restrict a widget key to the client's own domain |
+| `tenants/<id>.json` → `mcp_servers` block | **Which MCP servers this tenant can use** (Phase 6) — a CRM, a search tool, an internal API. In production, prefer `scripts/register_mcp_server.py` instead (see below) — no redeploy needed. | Give a tenant a search tool |
 
 ## The two placeholders you'll meet
 
@@ -154,3 +155,62 @@ them in sync by hand, or the bot will describe hours it can't actually book.
 keep a tenant on SMS-alert-only instead of a live transfer. Either way,
 re-run `provision_vapi` after changing the number — Vapi only transfers to
 numbers declared at provisioning time.
+
+## Connecting any remote MCP server (Phase 6)
+
+Set `MCP_ENABLED=true` in `.env` first — off by default, so this costs
+nothing until you turn it on. Two ways to give a tenant a server, matching
+`MCP_SOURCE` in `.env` (`json` by default, `supabase` in production — see
+`.env.example`):
+
+**`MCP_SOURCE=json` (dev/local)** — edit the tenant's `mcp_servers` array
+directly, same hot-reload as everything else here:
+
+```jsonc
+"mcp_servers": [
+  { "name": "tavily", "transport": "http",
+    "url": "https://mcp.tavily.com/mcp/?tavilyApiKey=${secret}",
+    "auth_secret_ref": "TAVILY_API_KEY" }
+]
+```
+
+**`MCP_SOURCE=supabase` (production)** — don't edit the JSON; use
+`scripts/register_mcp_server.py` instead. It writes straight to the live
+`mcp_servers` table and Vault, so a new server reaches the tenant on its very
+next turn — no redeploy, unlike everything else in this file:
+
+```
+python -m scripts.register_mcp_server --tenant hotel-mzv --name tavily \
+    --url 'https://mcp.tavily.com/mcp/?tavilyApiKey=${secret}' \
+    --secret tvly-xxxxx
+python -m scripts.register_mcp_server --tenant hotel-mzv --list
+python -m scripts.register_mcp_server --tenant hotel-mzv --name tavily --disable
+```
+
+**Two things worth knowing before pointing this at a real server:**
+
+- **`${secret}` is a placeholder, substituted at connect time from Vault —
+  never put a real credential in the JSON file or the table.** Real hosted
+  MCP servers don't agree on where the credential goes: Tavily's takes it as
+  a **URL query parameter** (`?tavilyApiKey=${secret}`, as above); most
+  others want a header instead —
+  `"headers": {"Authorization": "Bearer ${secret}"}`. Either way, `${secret}`
+  gets substituted from whatever `--secret` (or the tenant's own
+  `auth_secret_ref`) resolved to. Leave `headers` empty with an
+  `auth_secret_ref` set and it defaults to a bearer header for you.
+- **A server's `name` becomes part of every tool name it offers** (e.g.
+  `tavily_search`), so it must be lowercase, `a-z0-9_-` only, and under 32
+  characters — this is enforced at config load, not silently truncated.
+- **HTTP servers only, by default.** A `stdio` server (`transport: "stdio"`,
+  a `command` to run) needs `MCP_ALLOW_STDIO=true` — off by default because a
+  command string is code execution on the one box holding every tenant's
+  data. Only turn it on for a local server you trust.
+- **A dead or slow server degrades gracefully, never breaks a turn.** One
+  server timing out or erroring is dropped with a logged warning; the others
+  and the five native tools keep working.
+- `scripts/demo_mcp_server.py` is a zero-credential way to try this end to
+  end before pointing at a real vendor — see its docstring.
+
+**No native tool ever moves to MCP.** `check_availability`, `book_job`,
+`send_confirmation`, `escalate` and `is_emergency` stay built-in and typed —
+MCP is for everything else a business wants to plug in.

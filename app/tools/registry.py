@@ -41,3 +41,16 @@ def native_tools_for(tenant: TenantConfig, channel: str = "chat") -> list[BaseTo
     """
     del tenant, channel  # every tenant gets the full critical path in Phase 1
     return list(NATIVE_TOOLS)
+
+
+def is_slow_tool(name: str) -> bool:
+    """True for any tool that must be preceded by a spoken acknowledgement.
+
+    Every MCP tool is off the fast path by definition (plan §11's "long
+    tail") — a third-party server thinking is exactly the dead-air case
+    `SLOW_TOOLS` exists to prevent, and there's no way to enumerate MCP tool
+    names up front the way `SLOW_TOOLS` does for the fixed native five. So
+    the rule inverts: anything that *isn't* a known-fast native tool counts
+    as slow.
+    """
+    return name in SLOW_TOOLS or name not in NATIVE_TOOLS_BY_NAME

@@ -11,14 +11,14 @@ from __future__ import annotations
 import logging
 
 from langgraph.graph import END, START, StateGraph
-from langgraph.prebuilt import ToolNode, tools_condition
+from langgraph.prebuilt import tools_condition
 
 from app.brain.nodes.emergency_check import emergency_check
 from app.brain.nodes.reason import reason
 from app.brain.nodes.resolve_tenant import resolve_tenant
+from app.brain.nodes.tools import tools as tools_node
 from app.brain.state import ReceptionistState
 from app.config import get_settings
-from app.tools.registry import NATIVE_TOOLS
 
 try:  # langgraph >= 0.3 renamed it; the old name stays as an alias for now
     from langgraph.checkpoint.memory import InMemorySaver as _MemorySaver
@@ -37,9 +37,10 @@ def build_graph(checkpointer=None):
     builder.add_node("resolve_tenant", resolve_tenant)
     builder.add_node("emergency_check", emergency_check)
     builder.add_node("reason", reason)
-    # Phase 6 note: MCP tools are bound in `reason` but executed here too —
-    # ToolNode will need rebuilding per tenant once the registry is dynamic.
-    builder.add_node("tools", ToolNode(NATIVE_TOOLS))
+    # Resolved per invocation, not once at compile time — `reason` binds a
+    # per-tenant tool set (native + MCP), so `tools` must build ToolNode from
+    # that same set on every call. See app/brain/nodes/tools.py's docstring.
+    builder.add_node("tools", tools_node)
 
     builder.add_edge(START, "resolve_tenant")
     builder.add_edge("resolve_tenant", "emergency_check")

@@ -208,14 +208,60 @@ now has two endpoints, not one:
   caught and logged (never breaking the stream — confirmed live, not just in tests),
   so conversations still work end to end, they just aren't durably transcribed yet.
 
-Next: apply `0006_chat.sql` to the live Supabase project, then re-run
+**Phase 6 (MCP layer) is done — see `plans/phase6.md`.** `app/mcp/client.py` no longer
+returns `[]` unconditionally; the long tail (CLAUDE.md convention #2) is live:
+
+- **`langchain-mcp-adapters>=0.3`** is an optional extra (`pip install -e ".[mcp]"`),
+  imported lazily inside `load_mcp_tools` — an `ImportError` degrades to no MCP tools
+  with a WARNING, never a crashed turn. Its own dependency chain (`mcp` → `jsonschema` →
+  `rpds-py`, `pyjwt[crypto]` → `cryptography`, `pywin32` on win32) probed clean on this
+  box (Phase 6 Step 0), but the lazy-import fallback exists precisely because that isn't
+  guaranteed on every box — see the `uuid_utils` gotcha below.
+- **A real bug got fixed along the way, not just a new feature added:**
+  `app/brain/graph.py` used to build `ToolNode(NATIVE_TOOLS)` once, at compile time, from
+  a static list, while `reason` already bound a per-tenant tool set every turn. Nothing
+  exposed this before MCP existed, because nothing was ever bound outside that static
+  list. `app/brain/nodes/tools.py` is the fix: a node that resolves the same tool set
+  `reason` just bound (native + MCP) and builds `ToolNode` from it on every invocation.
+  Reproduced and confirmed live by temporarily reverting to the old static node during
+  development — see the CLAUDE.md gotcha below and `tests/test_mcp_tools_node.py`.
+- **Two read paths behind `MCP_SOURCE`** (`"json"` default, `"supabase"` in production):
+  unlike the full tenant-config read path (`TENANT_SOURCE`, still deferred), this one
+  flipped early and deliberately — `app/mcp/registry.py::servers_for()` is only ever
+  called from inside the already-async, already-gated, already-degrades-to-`[]`
+  `load_mcp_tools`, so it carries none of the risk that kept `TENANT_SOURCE` parked.
+  `scripts/register_mcp_server.py` adds/updates/removes a live tenant's server with one
+  command — no redeploy — writing the row through the Supabase admin path and any
+  credential into Vault via the existing `set_tenant_secret`.
+- **HTTP-only by default.** `MCP_ALLOW_STDIO=false` refuses `transport: "stdio"` servers
+  (a `command` string from tenant config is remote code execution on the one box holding
+  every tenant's data) unless an operator opts in explicitly.
+- **`${secret}` substitution, not an auth-style enum**, because real hosted MCP servers
+  don't agree on where the credential goes — Tavily's takes it as a **URL query
+  parameter** (`?tavilyApiKey=${secret}`), most others as a header. `${secret}` is
+  substituted into both `url` and every `headers` value at connect time
+  (`app/mcp/connections.py`), from a Vault secret resolved by reference — never inlined
+  into tenant config or the `mcp_servers` table.
+- **A tenant's resolved MCP tool list is cached with a fingerprint over the *resolved*
+  connection set**, not just a TTL — see the CLAUDE.md gotcha below for why that's load-
+  bearing (bind/execute consistency across the same turn), not just a latency
+  optimization.
+- **A first-party demo server** (`scripts/demo_mcp_server.py`, `FastMCP`, streamable HTTP,
+  two canned hotel-shaped tools) proves the whole path with zero accounts — the
+  acceptance criterion's live check runs against it.
+- **Native tools stay native.** No tier-1 tool moved to MCP; `check_availability` /
+  `book_job` / `send_confirmation` / `escalate` / `is_emergency` are unchanged.
+
+Next: apply `0006_chat.sql` **and** `0007_mcp.sql` to the live Supabase project together
+(same manual dashboard-SQL-editor step every prior migration needed), then re-run
 `provision_vapi --tenant hotel-mzv` so the transfer number Vapi will actually dial
 matches `emergency.escalation_phone` (needed once regardless of Twilio). Twilio stays
-parked until the client revisits that decision. Then Phase 6 (MCP) per plan §15 —
-Phase 4's own deferred items (a second real Cal.com account to prove cross-tenant
-booking end-to-end, the actual voice clone, the tenant read-path flip) and Phase 5's
-(`plans/phase10.md`: WhatsApp, per-key rate limiting once a usage-tier model exists)
-can land opportunistically whenever those inputs arrive.
+parked until the client revisits that decision. Phase 4's own deferred items (a second
+real Cal.com account to prove cross-tenant booking end-to-end, the actual voice clone,
+the tenant read-path flip), Phase 5's and Phase 6's own (`plans/phase10.md`: WhatsApp,
+per-key rate limiting once a usage-tier model exists, a concrete search/scraper MCP
+server once a key exists) can land opportunistically whenever those inputs arrive. Then
+Phase 7 (Deploy) per plan §15.
 
 ## Gotchas learned the hard way
 - **Groq leaks tool calls into text.** Llama 3.3 sometimes writes
@@ -352,11 +398,33 @@ can land opportunistically whenever those inputs arrive.
   it with `DuplicatePreparedStatementError` — use the `aws-0-<region>.pooler.supabase.com:5432`
   host from Settings → Database → Connection string → **Session pooler** tab.
 - **`psycopg`'s async mode cannot run on Windows' default `ProactorEventLoop`.** Only
-  `SelectorEventLoop` works. Linux (the deploy target) is unaffected — this only bites local
-  `uvicorn --reload` on a Windows dev box. `app/main.py` sets
-  `asyncio.WindowsSelectorEventLoopPolicy()` at import time, guarded by `sys.platform ==
-  "win32"`, before uvicorn creates its event loop. Any standalone script that touches
-  `app/db/checkpointer.py` directly (not through `app.main`) needs the same one-liner itself.
+  `SelectorEventLoop` works. Linux (the deploy target) is unaffected. **The fix is a
+  monkeypatch, not an `asyncio.set_event_loop_policy()` call** — that was tried first and
+  is silently inert: uvicorn's own `Server.run()` (`uvicorn/server.py`) calls
+  `asyncio.run(coro, loop_factory=self.config.get_loop_factory())`, and passing an explicit
+  `loop_factory` makes `asyncio.run`/`asyncio.Runner` build the loop directly, **never
+  consulting the event-loop policy at all**. On win32, `uvicorn.loops.asyncio.asyncio_loop_factory`
+  hardcodes `ProactorEventLoop` unless uvicorn is a `--reload`/multi-worker subprocess — so
+  the *documented* workaround (always run with `--reload`) happened to dodge the bug for an
+  unrelated reason (`use_subprocess=True` flips that branch), not because of the policy call.
+  Confirmed live: plain `uvicorn app.main:app` with no `--reload` stalled 30s on a
+  `psycopg_pool.PoolTimeout`, silently fell back to `InMemorySaver`, and then spammed
+  "Psycopg cannot use the 'ProactorEventLoop'" warnings forever after — meaning the durable
+  Postgres checkpointer was **never actually connecting** on this box before this fix,
+  regardless of `--reload`. `app/main.py` now patches
+  `uvicorn.loops.asyncio.asyncio_loop_factory` directly (guarded by `sys.platform ==
+  "win32"`) so it always returns `SelectorEventLoop`, no matter how uvicorn is launched —
+  see that file's comment for the full trace. A standalone script that never goes through
+  uvicorn's `Server.run()` (a bare `asyncio.run(main())`, no `loop_factory`) is unaffected by
+  any of this and still needs its own `asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())`
+  call, since plain `asyncio.run()` *does* still consult the policy.
+- **Windows can't have both a Postgres checkpointer and MCP `stdio` at the same time.**
+  Forcing `SelectorEventLoop` (above) fixes `psycopg`, but Windows' asyncio subprocess
+  support (`create_subprocess_exec`, which `MCP_ALLOW_STDIO=true` would need) only works
+  under `ProactorEventLoop` — never `SelectorEventLoop`. This is a genuine either/or on
+  Windows, not a bug to chase further; Postgres durability wins the trade since it's the one
+  already in active use, and `MCP_ALLOW_STDIO` defaults off anyway. Linux has no such
+  conflict — plain `SelectorEventLoop` supports subprocesses there too.
 - **Checkpoint tables must land in the `langgraph` Postgres schema, never `public`.**
   `AsyncPostgresSaver.setup()` creates unqualified `checkpoints` / `checkpoint_blobs` /
   `checkpoint_writes` tables in whatever schema is first on `search_path` —
@@ -381,3 +449,44 @@ can land opportunistically whenever those inputs arrive.
   image: it takes `tenant_id` as a parameter because it's never called with a tenant-scoped
   JWT, only the Supabase secret key (onboarding), so there's no caller-supplied tenant_id to
   distrust.
+- **`ToolNode` cannot be built once at graph-compile time, once MCP exists.** This was a real
+  bug from Phase 1 through Phase 5 (`app/brain/graph.py` used to build
+  `ToolNode(NATIVE_TOOLS)` a single time, from a static list), invisible only because nothing
+  ever bound a tool outside that list. `reason` binds `native_tools_for(tenant, channel) +
+  await load_mcp_tools(tenant)` **per tenant, per turn** — the moment a server-backed tool
+  existed, the static `tools` node would reject any call to it
+  (`"X is not a valid tool, try one of [...]"`), silently, with no useful log line. Fixed by
+  `app/brain/nodes/tools.py`: a node that resolves the same per-tenant set `reason` just
+  bound and builds a fresh `ToolNode` from it on every invocation. Reproduced and confirmed
+  live during Phase 6 development by temporarily reverting to the old static node —
+  `tests/test_mcp_tools_node.py` is the regression guard; don't revert this without moving
+  the fix somewhere else first.
+- **The MCP tool-list cache (`app/mcp/client.py`) is a correctness requirement, not a
+  latency one.** `MultiServerMCPClient` is stateless — every `get_tools()` opens fresh
+  sessions — so without a cache, `reason` (which binds tools) and the dynamic `tools` node
+  (which executes them) would each independently reconnect. If a flaky server answered
+  differently between the two calls in the same turn, the model could emit a call nothing
+  can run. The cache is keyed per tenant with a fingerprint over the *resolved* connection
+  set (post-secret-substitution), so a rotated Vault credential or an edited server list
+  invalidates it immediately rather than waiting out the TTL.
+- **MCP is HTTP-only by default; `stdio` is a deliberate off switch, not an oversight.** A
+  `command` string in tenant config is arbitrary code execution on the one box holding every
+  tenant's secrets and every tenant's data. `MCP_ALLOW_STDIO=false` refuses any
+  `transport: "stdio"` server with a WARNING unless an operator opts in explicitly
+  (`app/mcp/connections.py`).
+- **Never log a raw MCP connection.** With query-parameter auth (Tavily's hosted server
+  authenticates via `?tavilyApiKey=...`, not a header) the URL *is* the credential — a
+  plain `logger.warning("...%r", connection)` would leak it exactly like an unredacted Vapi
+  payload would leak Twilio credentials. `app/mcp/connections.py::redacted()` strips the
+  entire query string and every header value, unconditionally; use it before any MCP
+  connection dict reaches a log line.
+- **`MCP_SOURCE=supabase` is the one tenant-config read path that flipped to Supabase
+  early, on purpose — this does NOT mean `TENANT_SOURCE` is safe to flip too.**
+  `app/mcp/registry.py::servers_for()` is only ever called from inside
+  `load_mcp_tools`, which is already async, already gated on `MCP_ENABLED` (off by
+  default), and already degrades to `[]` on any failure — none of which is true of the
+  full tenant-config read path, whose flip stays deferred (`plans/phase10.md` item 8)
+  because `tests/conftest.py`'s `isolated_runtime` walks `get_repository().list_ids()`
+  in an autouse fixture that runs before that path could safely point at Supabase.
+  Adding a server to a live `MCP_SOURCE=supabase` tenant is one row insert
+  (`scripts/register_mcp_server.py`) — no redeploy, unlike every other tenant-config edit.

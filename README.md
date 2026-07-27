@@ -4,7 +4,7 @@ One LangGraph brain, two channels (phone + chat), many tenants. Full spec in
 [`AI-Receptionist-Build-Plan.md`](AI-Receptionist-Build-Plan.md); conventions in
 [`CLAUDE.md`](CLAUDE.md).
 
-**Status: Phases 1–5 complete.** The brain runs on Groq/Gemini with the five
+**Status: Phases 1–6 complete.** The brain runs on Groq/Gemini with the five
 native tools wired, and is reachable by typed chat, an embeddable chat
 widget, *and* by voice through Vapi's Custom-LLM mode. `hotel-mzv` books real
 appointments against a live Cal.com calendar. Supabase now backs storage
@@ -15,12 +15,16 @@ widget's own `/chat/session` handshake, event filtering and transcript
 persistence are live-verified too (see `plans/phase5.md`) — the two new
 tables it needs (`chat_sessions`/`chat_messages`, `0006_chat.sql`) still need
 applying to a live project the same manual way every prior migration did.
-SMS (Twilio) and the Vapi warm transfer it would trigger are implemented and
-tested but intentionally left off — parked by client decision, not a
-technical gap. `northside-plumbing` stays on the in-process booking logic
-(durable once Supabase is the store, just no external calendar sync) as the
-second example tenant. Flipping any tenant's provider is a one-line JSON edit
-either way — see `content/README.md`.
+A tenant can now connect **any number of MCP servers** — a CRM, a search
+tool, an internal API — and the brain uses their tools in conversation
+alongside the five native ones (see `plans/phase6.md`); a first-party demo
+server (`scripts/demo_mcp_server.py`) proves the whole path with zero
+accounts. SMS (Twilio) and the Vapi warm transfer it would trigger are
+implemented and tested but intentionally left off — parked by client
+decision, not a technical gap. `northside-plumbing` stays on the in-process
+booking logic (durable once Supabase is the store, just no external calendar
+sync) as the second example tenant. Flipping any tenant's provider is a
+one-line JSON edit either way — see `content/README.md`.
 
 ## Talk to it — five doors, one brain
 
@@ -100,12 +104,14 @@ Phase 4's cloned voice drops into the same field.
 
 | | |
 |---|---|
-| Dev server | `uvicorn app.main:app --reload` (health: `GET /health`, reports `store`/`checkpointer`/`widget`) — or `python -m uvicorn app.main:app --reload` if Windows Device Guard blocks the `.exe` |
+| Dev server | `uvicorn app.main:app --reload` (health: `GET /health`, reports `store`/`checkpointer`/`widget`/`mcp`) — or `python -m uvicorn app.main:app --reload` if Windows Device Guard blocks the `.exe` |
 | Terminal chat | `python -m scripts.chat_cli` |
 | Build the widget | `npm --prefix widget install && npm --prefix widget run build` |
 | Provision voice | `python -m scripts.provision_vapi --tenant <id> [--show\|--dry-run]` |
 | Sync tenant → Supabase | `python -m scripts.sync_tenants [--tenant <id>]` |
 | Onboard a tenant | `python -m scripts.onboard_tenant --config <file.json> [--dry-run]` |
+| Run the demo MCP server | `pip install -e ".[mcp]"` then `python -m scripts.demo_mcp_server --port 8765` |
+| Connect an MCP server to a tenant | `python -m scripts.register_mcp_server --tenant <id> --name <n> --url <url> [--secret <key>] [--list\|--disable\|--remove\|--dry-run]` |
 | LangGraph Studio | `pip install -e ".[studio]"` then `langgraph dev` (see `langgraph.json`) |
 | Tests | `pytest` |
 | Lint / format | `ruff check .` · `ruff format .` |
@@ -122,7 +128,7 @@ app/
                 vapi_llm.py (/chat/completions shim) · webhooks.py
                 openai_compat.py · vapi_schema.py · vapi_provisioning.py
   tools/        native tier-1 tools + booking/ and messaging/ provider interfaces
-  mcp/          per-tenant MCP loader (Phase 6)
+  mcp/          per-tenant MCP registry, connections + loader (Phase 6)
   tenancy/      models · repository · cached loader · secrets.py · sync.py · voice.py
   db/           models · store protocols · memory_store · supabase_store · factory ·
                 auth.py (RLS JWT) · checkpointer.py (durable Postgres) · migrations/
@@ -142,7 +148,10 @@ START → resolve_tenant → emergency_check → reason ⇄ tools → END
 `resolve_tenant` maps a phone number / widget key / explicit id to a tenant and
 loads its cached profile. `emergency_check` runs a deterministic, per-trade
 keyword classifier — no LLM hop on the safety path. `reason` streams Groq tokens
-with the native tools bound. `tools` executes them and loops back.
+with the tenant's tools bound — the five native ones plus, if the tenant has
+any configured, MCP tools from its own servers (Phase 6). `tools` resolves
+that same per-tenant set fresh on every invocation (`app/brain/nodes/tools.py`)
+and executes whichever was called, then loops back.
 
 Channels never contain logic: they call `stream_turn()` and re-encode its events
 for their transport.
@@ -154,7 +163,12 @@ for their transport.
   acknowledgement so the caller never hears dead air.
 * **Two tool tiers.** Critical path (`check_availability`, `book_job`,
   `send_confirmation`, `escalate`, `is_emergency`) is native and typed. Long-tail
-  integrations go through MCP.
+  integrations go through MCP (`app/mcp/`, Phase 6) — a tenant connects any number
+  of HTTP MCP servers via its own JSON or, in production, one row in the
+  `mcp_servers` table (`scripts/register_mcp_server.py`, no redeploy needed).
+  `app/brain/nodes/tools.py` resolves the same native-plus-MCP set `reason`
+  bound and rebuilds `ToolNode` from it on every invocation — it can't be a
+  static list once tools vary per tenant.
 * **Tenant isolation.** Tools take `tenant_id` from the `RunnableConfig`, never
   from a model argument, so the LLM cannot cross tenants. Conversation threads
   are tenant-prefixed. `tests/test_tenant_isolation.py` guards this.
@@ -206,9 +220,15 @@ that each request re-sends a fixed overhead:
 So ~76 requests ≈ 100k tokens — which is exactly Groq's free-tier daily cap.
 `GET /health` and the `turn used N llm requests` log line make this visible.
 
+**MCP tools (Phase 6) add to the floor above, on every turn a tenant has any
+configured** — every bound tool schema is re-sent on every request, whether
+or not that turn needs it. `MCP_MAX_TOOLS` (default 8) caps the damage;
+`tool_allowlist` on a tenant's own server config is the finer-grained knob.
+
 Levers, cheapest first: switch to a smaller/cheaper model (one env var, see
 `.env.example`), trim the system prompt, drop tools the graph doesn't need bound
-every turn, or fold `send_confirmation` into `book_job` to remove a hop.
+every turn, narrow a tenant's `tool_allowlist` or `MCP_MAX_TOOLS`, or fold
+`send_confirmation` into `book_job` to remove a hop.
 
 ## Groq tool-calling, in practice
 
@@ -246,10 +266,11 @@ second example tenant.
 | Voice: streaming, tenancy, call records, provisioning; consent enforcement (Python + a DB trigger) | The actual voice clone — no tenant has a real cloned `voice_id` yet, needs an audio sample + written consent |
 | Per-tenant Cal.com/Twilio credentials via Vault, live-verified | A second real Cal.com account, to prove two tenants booking into two different calendars end-to-end (currently only credential *resolution* is proven, not a full live booking) |
 | Chat widget: handshake, streaming, quick replies, event filtering, CORS — live-verified end to end against real Gemini + Cal.com | `chat_sessions`/`chat_messages` (`app/db/migrations/0006_chat.sql`) — written and offline-tested, but not yet applied to a live project; until then transcript writes fail (caught, logged, never break the stream) and every conversation lives only in the checkpointer |
+| MCP: any tenant can connect HTTP MCP servers (registry, secret substitution, per-server timeouts, tenant-scoped caching) — proven against a first-party demo server (`scripts/demo_mcp_server.py`) | A concrete third-party search/scraper server (Tavily/Firecrawl/Exa) — the config path is generic and vendor-neutral, just needs a key; `mcp_servers` (`app/db/migrations/0007_mcp.sql`) not yet applied to a live project either |
 
-See `plans/phase4.md` and `plans/phase5.md` for the full implementation
-records and live-verification checklists. Phase 6 (MCP) is next per §15 of
-the plan.
+See `plans/phase4.md`, `plans/phase5.md` and `plans/phase6.md` for the full
+implementation records and live-verification checklists. Phase 7 (Deploy) is
+next per §15 of the plan.
 
 ## Security
 

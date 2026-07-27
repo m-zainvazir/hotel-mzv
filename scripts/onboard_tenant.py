@@ -27,14 +27,19 @@ What this does, in order (plan §6d):
      scripts.provision_vapi, not duplicated here.
   6. Flip status -> "active".
 
-Two plan §6d steps are deliberately not automated here:
+One plan §6d step is deliberately not automated here:
   * Calendar connection (Cal.com) — event types are still created by hand in
     the Cal.com dashboard (see content/README.md's checklist); this script
     only handles the credential half (--calcom-api-key). Put the resulting
     event_type_id in --config's booking.event_type_id yourself.
-  * MCP server registration — Phase 6 isn't built yet. mcp_servers in
-    --config round-trips into the tenant file and Supabase; nothing
-    consumes it until Phase 6 lands.
+
+MCP servers in --config round-trip into the tenant file and Supabase's
+`mcp_servers` table (step 2, via app/tenancy/sync.py), and the brain will use
+them the moment MCP_ENABLED=true. To add or update a single server on an
+already-onboarded tenant without re-running this whole script, use
+`scripts/register_mcp_server.py` instead — it also handles the secret half
+(writing a server's credential into Vault), which this script's --config
+round-trip does not.
 """
 
 from __future__ import annotations

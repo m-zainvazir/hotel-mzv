@@ -132,7 +132,7 @@
   ],
   "emergency": {
     "escalation_phone": "+15551230911",
-    "allow_warm_transfer": true,
+    "allow_warm_transfer": false,
     "keywords": [
       "fire",
       "smoke",
@@ -153,8 +153,8 @@
       "carbon monoxide",
       "gas leak"
     ],
-    "holding_message": "That sounds serious — please stay where you are and keep away from any danger. I'm getting our duty manager on the line right now.",
-    "alert_template": "EMERGENCY at Hotel_MZV — {customer_name} ({customer_phone}): {reason}. Guest is on the line now."
+    "holding_message": "That sounds serious \u2014 please stay where you are and keep away from any danger. I'm getting our duty manager on the line right now.",
+    "alert_template": "EMERGENCY at Hotel_MZV \u2014 {customer_name} ({customer_phone}): {reason}. Guest is on the line now."
   },
   "booking": {
     "provider": "calcom",
@@ -182,5 +182,17 @@
     "max_duration_seconds": 600,
     "silence_timeout_seconds": 20
   },
-  "mcp_servers": []
+  "mcp_servers": [
+    {
+      "name": "demo",
+      "transport": "http",
+      "url": "http://127.0.0.1:8765/mcp"
+    },
+    {
+      "name": "tavily",
+      "transport": "http",
+      "url": "https://mcp.tavily.com/mcp/?tavilyApiKey=${secret}",
+      "auth_secret_ref": "TAVILY_API_KEY"
+    }
+  ]
 }

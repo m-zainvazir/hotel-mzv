@@ -30,6 +30,7 @@ from app.brain.llm import set_llm_override
 from app.config import Settings, reset_settings_cache
 from app.db.auth import clear_jwt_cache
 from app.db.memory_store import get_store
+from app.mcp.client import clear_mcp_cache
 from app.tenancy.loader import clear_tenant_cache, get_repository, get_tenant_config
 from app.tenancy.models import TenantConfig
 from app.tenancy.secrets import clear_secret_cache
@@ -224,6 +225,7 @@ def isolated_runtime():
     reset_shared_clients()
     clear_jwt_cache()
     clear_secret_cache()
+    clear_mcp_cache()
     seed_acknowledgements(1234)
     yield
     reset_settings_cache()
@@ -234,6 +236,7 @@ def isolated_runtime():
     reset_shared_clients()
     clear_jwt_cache()
     clear_secret_cache()
+    clear_mcp_cache()
 
 
 @pytest.fixture

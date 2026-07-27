@@ -283,6 +283,43 @@ Using `langchain-mcp-adapters`' **`MultiServerMCPClient`**, the brain connects t
 
 This is the piece that makes it "connect to multiple MCP servers… and many more" exactly as the client asked — unlimited, native, per tenant.
 
+**Amendment (Phase 6 implementation): three refinements on top of this section's
+design, plus one pre-existing bug this phase fixed along the way.** The `MultiServerMCPClient`
+design above is implemented as specified — every server this section calls for (Google
+Sheets, Supabase, scrapers, CRM, or literally any other HTTP MCP server) works through the
+same generic config path, no per-vendor code.
+
+- **Transport is HTTP-only by default, not "http/stdio" as originally listed.**
+  `MCP_ALLOW_STDIO=false` refuses a `stdio` server unless an operator opts in explicitly —
+  a `command` string in tenant config is remote code execution on the one box holding every
+  tenant's data, a risk this section didn't weigh because a self-serve config surface
+  wasn't yet in view.
+- **Auth is `${secret}` substitution into the connection (URL or headers), not just "store
+  MCP auth in the encrypted secrets table."** Real hosted MCP servers don't agree on where
+  the credential goes — Tavily's authenticates via a URL query parameter, most others via a
+  header — so the placeholder is substituted into whichever the server's config specifies,
+  resolved from Vault by reference (`app/mcp/connections.py`), never inlined.
+  `scripts/register_mcp_server.py` is the "add a server to a live tenant" command this
+  section implies but doesn't name.
+  "Collision safety" (tool-name prefixing) is implemented exactly as described —
+  `tool_name_prefix=True`, confirmed against the installed adapter's source to use an
+  underscore separator.
+- **The tenant registry read path (`MCP_SOURCE`) flipped to Supabase early, unlike full
+  tenant config.** `plans/phase4.md`'s "On the tenant read path" note deferred the full
+  config flip for a specific test-fixture-ordering reason that doesn't apply to the MCP
+  registry alone — see `plans/phase6.md` for why. The practical effect: adding a server to
+  a live tenant is one row insert, not the edit-commit-redeploy every other piece of tenant
+  config still needs.
+- **A latent bug, exposed only once this section's design was actually implemented:**
+  `app/brain/graph.py` had built its `tools` node once, at graph-compile time, from a
+  static list — invisible through Phases 1–5 because nothing was ever bound outside
+  that static list. The moment a tenant could have a per-turn, per-tenant tool set (exactly
+  what this section calls for), that assumption broke. Fixed by resolving the tool set
+  fresh on every node invocation (`app/brain/nodes/tools.py`); see `plans/phase6.md` and
+  CLAUDE.md's gotchas for the full account.
+
+See `plans/phase6.md` for the full implementation record and live-verification checklist.
+
 ---
 
 ## 12. The two "wants" — voice clone + avatar

@@ -15,12 +15,53 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
 if sys.platform == "win32":
-    # psycopg's async mode (Phase 4 Step 7's Postgres checkpointer) cannot
-    # run on Windows' default ProactorEventLoop — only SelectorEventLoop.
-    # Linux (the actual deploy target) is unaffected; this only matters for
-    # local `uvicorn --reload` on a Windows dev box. Must be set before
-    # uvicorn creates its event loop, hence top-of-module.
-    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    # psycopg's async mode (Phase 4 Step 7's Postgres checkpointer) needs
+    # SelectorEventLoop; Windows' default is ProactorEventLoop.
+    #
+    # `asyncio.set_event_loop_policy(...)` — the previous fix here — does
+    # NOT work against uvicorn's own serving loop. `uvicorn.server.Server.run()`
+    # calls `asyncio.run(coro, loop_factory=self.config.get_loop_factory())`,
+    # and an explicit `loop_factory` makes `asyncio.run`/`asyncio.Runner`
+    # build the loop directly — it never consults `asyncio.get_event_loop_policy()`
+    # at all. On win32, `uvicorn.loops.asyncio.asyncio_loop_factory` hardcodes
+    # `ProactorEventLoop` unless uvicorn is running as a `--reload`/multi-worker
+    # subprocess (`use_subprocess=True`), which only coincidentally selects
+    # `SelectorEventLoop` for an unrelated reason. Confirmed live: running
+    # `uvicorn app.main:app` *without* `--reload` stalled 30s on a psycopg
+    # `PoolTimeout`, then fell back to `InMemorySaver` while continuing to
+    # spam "Psycopg cannot use the 'ProactorEventLoop'" warnings forever after
+    # — the policy call above was silently inert.
+    #
+    # Fix: patch uvicorn's own factory function so it always returns
+    # SelectorEventLoop on win32, regardless of `--reload`.
+    # `uvicorn.loops.auto.auto_loop_factory` re-imports this name from
+    # `uvicorn.loops.asyncio` fresh on every call (a function-local import,
+    # not a module-level one), so patching the attribute here is picked up
+    # correctly no matter how uvicorn is launched.
+    #
+    # Real trade-off, not just a theoretical one: Windows' asyncio subprocess
+    # support (`create_subprocess_exec`, which MCP's `stdio` transport would
+    # need) only works under ProactorEventLoop, never SelectorEventLoop —
+    # so this closes the door on ever combining `MCP_ALLOW_STDIO=true` with
+    # a Postgres checkpointer on this box; only one of the two can have the
+    # loop it needs, on Windows. Linux (the deploy target) has no such
+    # conflict — plain SelectorEventLoop supports subprocesses there — so
+    # this is a Windows-dev-box-only limitation, and Postgres durability
+    # wins the trade since it's the one already in active use.
+    #
+    # A standalone script that never goes through uvicorn's Server.run() at
+    # all (e.g. a bare `asyncio.run(main())` with no `loop_factory`) is
+    # unaffected by this — plain `asyncio.run()` *does* still consult the
+    # event-loop policy, so such a script needs its own
+    # `asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())`
+    # call instead (see CLAUDE.md's psycopg gotcha).
+    import uvicorn.loops.asyncio
+
+    def _selector_loop_factory(use_subprocess: bool = False) -> type[asyncio.AbstractEventLoop]:
+        del use_subprocess  # irrelevant here — Selector is forced unconditionally
+        return asyncio.SelectorEventLoop
+
+    uvicorn.loops.asyncio.asyncio_loop_factory = _selector_loop_factory
 
 from app import __version__
 from app.brain.graph import active_checkpointer_name, get_graph, init_postgres_checkpointer
@@ -127,4 +168,18 @@ async def health() -> dict:
         # `COPY widget/dist ...`) is one curl away from visible instead of a
         # 404 the first time a client's site tries to load the widget.
         "widget": "built" if WIDGET_BUNDLE_PATH.is_file() else "missing",
+        "mcp": _mcp_health(settings),
     }
+
+
+def _mcp_health(settings) -> str:
+    """`"off"` / `"json"` / `"supabase"` / `"unavailable"` — a misconfigured
+    or blocked MCP layer is one curl away from visible, same reasoning as
+    `store` and `widget` above."""
+    if not settings.mcp_enabled:
+        return "off"
+    try:
+        import langchain_mcp_adapters  # noqa: F401
+    except ImportError:
+        return "unavailable"
+    return settings.mcp_source

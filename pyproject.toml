@@ -37,8 +37,17 @@ google = [
     "langchain-google-genai>=4.0",
     'uuid-utils>=0.12,<0.16; sys_platform == "win32"',
 ]
-# Phase 6 — long-tail tools.
-mcp = ["langchain-mcp-adapters>=0.1"]
+# Phase 6 — long-tail tools. >=0.3 is a hard floor, not a preference: 0.3.0 is
+# the first release requiring langchain-core>=1.0, and this repo is on core
+# 1.5.0 — a looser `>=0.1` pin can resolve to a pre-0.3 release built against
+# core 0.3.x and silently downgrade the whole stack, the exact failure mode
+# CLAUDE.md already records for the `google` extra. Verified live (Phase 6
+# Step 0): the adapter's own dependency chain (mcp -> jsonschema -> rpds-py,
+# pyjwt[crypto] -> cryptography, pywin32 on win32) installs and imports
+# cleanly on this box, but app/mcp/client.py still imports it lazily and
+# degrades to no MCP tools on ImportError, since that isn't guaranteed on
+# every box (see the uuid_utils gotcha above).
+mcp = ["langchain-mcp-adapters>=0.3"]
 # Durable conversation memory (Phase 4 Step 7). Optional and self-degrading:
 # app/brain/graph.py falls back to InMemorySaver with a WARNING if this
 # isn't installed, so a blocked compiled DLL (see the uuid_utils gotcha
