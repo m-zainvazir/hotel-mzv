@@ -70,6 +70,7 @@ from app.config import REPO_ROOT, get_settings
 from app.db.checkpointer import close_postgres_pool
 from app.db.factory import get_store
 from app.logging_config import configure_logging
+from app.preflight import verify_production_settings
 from app.tenancy.loader import get_repository
 from app.tools.http_client import close_shared_clients
 
@@ -82,6 +83,17 @@ WIDGET_DEMO_PATH = REPO_ROOT / "widget" / "demo.html"
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     configure_logging()
+    # Fail loudly and all-at-once at startup, not one silently-open endpoint
+    # at a time in production: app/channels/security.py's auth guards and
+    # widget_auth's session signing fail *open* when their secret is unset —
+    # correct for a zero-config dev box, wrong for a live deploy. See
+    # app/preflight.py's docstring.
+    settings = get_settings()
+    problems = verify_production_settings(settings)
+    if problems:
+        raise RuntimeError(
+            "APP_ENV=production preflight failed:\n" + "\n".join(f"  - {p}" for p in problems)
+        )
     # Compile the graph at boot so the first caller doesn't pay for it. This
     # always succeeds (in-memory, zero I/O) before anything Supabase-shaped
     # is attempted.
