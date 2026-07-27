@@ -204,6 +204,18 @@ class Settings(BaseSettings):
     #: (Phase 4) — chat transcripts carry guest names and phone numbers.
     chat_transcript_retention_days: int = 30
 
+    # --- rate limiting (Phase 7) --------------------------------------------
+    #: In-process, per-replica (see app/channels/ratelimit.py's docstring for
+    #: why that's the deliberate limit, not an oversight).
+    rate_limit_enabled: bool = True
+    #: Per client IP, on both /chat and /chat/session.
+    chat_requests_per_minute: int = 20
+    #: Per tenant, on /chat only — protects one tenant's daily LLM budget
+    #: (Groq's free tier is ~76 requests/day) from any single widget key.
+    chat_requests_per_day: int = 200
+    #: Per widget session, on /chat only.
+    session_requests_per_hour: int = 30
+
     @property
     def content_dir(self) -> Path:
         """The single folder holding user-editable content (see content/README.md)."""

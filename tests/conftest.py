@@ -27,6 +27,7 @@ from pydantic import Field
 from app.brain.acknowledge import seed as seed_acknowledgements
 from app.brain.graph import reset_graph
 from app.brain.llm import set_llm_override
+from app.channels.ratelimit import reset_rate_limits
 from app.config import Settings, reset_settings_cache
 from app.db.auth import clear_jwt_cache
 from app.db.memory_store import get_store
@@ -226,6 +227,7 @@ def isolated_runtime():
     clear_jwt_cache()
     clear_secret_cache()
     clear_mcp_cache()
+    reset_rate_limits()
     seed_acknowledgements(1234)
     yield
     reset_settings_cache()
@@ -233,6 +235,7 @@ def isolated_runtime():
     reset_graph()
     set_llm_override(None)
     reset_provider_overrides()
+    reset_rate_limits()
     reset_shared_clients()
     clear_jwt_cache()
     clear_secret_cache()

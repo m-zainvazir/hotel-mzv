@@ -34,6 +34,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.brain.runner import BrainEvent, stream_turn
+from app.channels.ratelimit import enforce_chat_rate_limit, enforce_session_rate_limit
 from app.channels.security import ChatAuth, require_chat_caller
 from app.channels.widget_auth import mint_session_token, new_session_id
 from app.config import get_settings
@@ -92,7 +93,7 @@ class ChatSessionResponse(BaseModel):
     tenant: ChatSessionTenant
 
 
-@router.post("/chat/session")
+@router.post("/chat/session", dependencies=[Depends(enforce_session_rate_limit)])
 async def chat_session(
     payload: ChatSessionRequest, origin: str | None = Header(default=None)
 ) -> ChatSessionResponse:
@@ -152,7 +153,7 @@ async def chat_session(
     )
 
 
-@router.post("/chat")
+@router.post("/chat", dependencies=[Depends(enforce_chat_rate_limit)])
 async def chat(
     request: ChatRequest, auth: ChatAuth = Depends(require_chat_caller)
 ) -> StreamingResponse:
