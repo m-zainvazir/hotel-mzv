@@ -132,7 +132,7 @@
   ],
   "emergency": {
     "escalation_phone": "+15551230911",
-    "allow_warm_transfer": false,
+    "allow_warm_transfer": true,
     "keywords": [
       "fire",
       "smoke",

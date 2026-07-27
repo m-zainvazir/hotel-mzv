@@ -35,6 +35,9 @@ widget/dist/*
 .coverage
 htmlcov/
 
+# --- local tooling output -------------------------------------------------
+graphify-out/
+
 # --- editors / os --------------------------------------------------------
 .vscode/
 .idea/
