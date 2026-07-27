@@ -216,6 +216,19 @@ class Settings(BaseSettings):
     #: Per widget session, on /chat only.
     session_requests_per_hour: int = 30
 
+    # --- observability: LangSmith (Phase 7 Step 7) --------------------------
+    #: These three were always in .env.example, but were never real Settings
+    #: fields (extra="ignore" swallowed them) and nothing ever called
+    #: load_dotenv() -- so pydantic-settings read them from .env without
+    #: exporting to os.environ, and LangChain's tracer reads os.environ. The
+    #: documented switch did nothing under uvicorn. app/main.py's lifespan
+    #: exports these into os.environ before get_graph() is built, which is
+    #: the actual fix; being real fields is also what makes them visible to
+    #: `/health`'s auth-gated detail and stripped by hermetic_settings.
+    langchain_tracing_v2: bool = False
+    langchain_api_key: str | None = None
+    langchain_project: str = "ai-receptionist"
+
     @property
     def content_dir(self) -> Path:
         """The single folder holding user-editable content (see content/README.md)."""

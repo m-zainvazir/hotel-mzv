@@ -7,6 +7,7 @@ the only thing you deploy.
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 from contextlib import asynccontextmanager
 
@@ -105,6 +106,17 @@ async def lifespan(app: FastAPI):
         raise RuntimeError(
             "APP_ENV=production preflight failed:\n" + "\n".join(f"  - {p}" for p in problems)
         )
+    # LangChain's tracer reads os.environ directly, not Settings -- pydantic-
+    # settings loading .env never exports there, so this must happen before
+    # anything builds a traced run. Must run before get_graph(): LangGraph
+    # nodes read LANGCHAIN_TRACING_V2 at call time, but the client that
+    # posts runs is configured once, and getting this in before the first
+    # compiled graph exists is the simplest way to guarantee that (Phase 7
+    # Step 7).
+    if settings.langchain_tracing_v2 and settings.langchain_api_key:
+        os.environ["LANGCHAIN_TRACING_V2"] = "true"
+        os.environ["LANGCHAIN_API_KEY"] = settings.langchain_api_key
+        os.environ["LANGCHAIN_PROJECT"] = settings.langchain_project
     # Compile the graph at boot so the first caller doesn't pay for it. This
     # always succeeds (in-memory, zero I/O) before anything Supabase-shaped
     # is attempted.
@@ -219,6 +231,7 @@ async def health(authenticated: bool = Depends(is_ops_caller)) -> dict:
         body["llm_provider"] = settings.llm_provider
         body["model"] = settings.active_model
         body["tenants"] = get_repository().list_ids()
+        body["tracing"] = bool(settings.langchain_tracing_v2 and settings.langchain_api_key)
     return body
 
 
