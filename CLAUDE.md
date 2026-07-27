@@ -294,14 +294,34 @@ trusted caller is exempt, same as the Vapi routes). `LANGCHAIN_TRACING_V2` et al
 real `Settings` fields exported into `os.environ` by `lifespan` — see the gotcha below for
 why they were silently inert before. `.github/workflows/ci.yml` and `keepalive.yml` exist for
 the first time. `scripts/loadtest.py` drives `/chat` and `/chat/completions` over real
-HTTP against a running server and reports p50/p95/p99 latency. **Still needed, and
-blocked on live account decisions, not code:** a go/no-go on re-creating the Supabase
-project in a US region (the app must be US-based to stay near Groq/Vapi; a
-different-region Supabase adds a real per-turn round trip to the checkpointer's
-cold-thread read — see the plan's "region trade-off" note for the full accounting), then
-the actual Railway deploy and a `provision_vapi` re-run against the live URL (**in that
-order** — provisioning after deploying means the running image's tenant JSON has no
-assistant id yet, and tenant resolution silently falls through).
+HTTP against a running server and reports p50/p95/p99 latency.
+
+**Step 10 (Supabase re-creation) is done and live-verified.** The project is now on
+`us-east-1` (was Asia) — chosen over keeping Asia or moving the *app* to Asia instead:
+Vapi and the active LLM provider (Gemini, direct API — not Vertex AI) are both US/EU-
+anchored with no region selector of their own, so co-locating the app + DB there is the
+only lever actually under this project's control; moving the app near Pakistan instead
+would add a second cross-continental hop on both the Vapi and model legs, not remove one.
+All 7 migrations applied clean via a one-off `psycopg` script (no dashboard SQL editor
+needed — `DATABASE_URL` was already the session-pooler URI). One real gotcha hit along
+the way: **a freshly created Supabase project's `service_role` key is not
+`SUPABASE_JWT_SECRET`.** They're both shown as "keys" in the dashboard but are entirely
+different values — `SUPABASE_JWT_SECRET` is the legacy HS256 signing secret PostgREST
+verifies `app/db/auth.py`'s tenant JWTs against, and pasting `service_role` there instead
+produces a PGRST301 ("None of the keys was able to decode the JWT") that looks exactly
+like a config problem, because it is one, just not the one it seems — the actual value
+lives at **Project Settings → JWT Keys → Legacy** (a separate sidebar page from
+**Settings → API Keys**, which only shows `anon`/`service_role`). Confirmed live on the
+new project: `checkpointer: "postgres"`, `store: "supabase"`, `/rest/v1/checkpoints`
+still 404s (schema isolation holds), `sync_tenants` pushed both tenants, and the Cal.com
+Vault secret round-trips correctly scoped to `hotel-mzv` only (`northside-plumbing`
+correctly gets nothing back). The old Asia project still exists, untouched — deleting it
+is a separate decision, not part of this migration.
+
+**Still needed, and blocked on live account decisions, not code:** the actual Railway
+deploy and a `provision_vapi` re-run against the live URL (**in that order** —
+provisioning after deploying means the running image's tenant JSON has no assistant id
+yet, and tenant resolution silently falls through).
 
 ## Gotchas learned the hard way
 - **Groq leaks tool calls into text.** Llama 3.3 sometimes writes
