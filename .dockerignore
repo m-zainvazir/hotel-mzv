@@ -1,0 +1,45 @@
+# The Dockerfile only ever COPYs specific paths (app, scripts, content,
+# widget/dist, widget/demo.html, pyproject.toml, README.md, the lockfile) —
+# this file keeps everything else out of the build *context* sent to the
+# daemon, which matters for build speed and for not handing a Docker daemon
+# (local or CI) a copy of .env / .git history it never needed.
+
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+
+.git/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# local tooling output, not project content
+graphify-out/
+
+node_modules/
+widget/node_modules/
+# widget/dist/widget.js + .buildhash ARE needed — explicit COPY in the
+# Dockerfile handles that; this ignore is about the build *context*, not
+# what actually lands in the image, so widget/dist stays excluded here too
+# on the same "don't ship what wasn't asked for" logic as widget's own
+# .gitignore rule.
+
+.env
+.env.*
+!.env.example
+apis.md
+*.pem
+*.key
+service-account*.json
+google-credentials*.json
+
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
