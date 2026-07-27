@@ -1,0 +1,26 @@
+name: keepalive
+
+# Free Supabase projects pause after 7 idle days -- a paused project means
+# the receptionist answers calls and cannot book anything, silently, until
+# someone notices. Hits /readyz (app/main.py), not /health: /health never
+# touches the database at all, so it could never have prevented this (see
+# plans/phase7.md Step 4). Every ~3 days, comfortably under the 7-day limit
+# even if a run or two is skipped/fails.
+on:
+  schedule:
+    - cron: "0 6 */3 * *"
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Hit /readyz
+        run: |
+          if [ -z "${DEPLOY_URL}" ]; then
+            echo "DEPLOY_URL repo secret is not set -- nothing to ping." >&2
+            exit 1
+          fi
+          curl -fsS --max-time 15 "${DEPLOY_URL%/}/readyz"
+        env:
+          DEPLOY_URL: ${{ secrets.DEPLOY_URL }}
