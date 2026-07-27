@@ -252,17 +252,27 @@ async def test_escalate_never_promises_a_transfer_on_chat(hotel):
     assert hotel.emergency.escalation_phone in result
 
 
-async def test_escalate_promises_a_transfer_on_voice_by_default(hotel):
+async def test_escalate_promises_a_transfer_on_voice_by_default(hotel, override_tenant):
     """Phase 3: voice gets a real WarmTransferEscalator by default (as long as
     the tenant has an escalation_phone and hasn't opted out), and the wording
-    follows automatically from `Escalator.can_transfer`."""
+    follows automatically from `Escalator.can_transfer`.
+
+    hotel-mzv.json itself has `allow_warm_transfer: false` (no real
+    escalation number provisioned yet — plans/phase7.md Step 11), so this
+    registers an explicit override via `override_tenant` rather than relying
+    on the fixture's current real-world value."""
+    tenant = hotel.model_copy(
+        update={"emergency": hotel.emergency.model_copy(update={"allow_warm_transfer": True})}
+    )
+    override_tenant(tenant)
+
     result = await escalate.ainvoke(
-        {"reason": "gas smell"}, config=tool_config(hotel.tenant_id, channel="voice")
+        {"reason": "gas smell"}, config=tool_config(tenant.tenant_id, channel="voice")
     )
 
     assert "Transferring the caller" in result
     assert "CANNOT transfer" not in result
-    assert hotel.emergency.escalation_phone in result
+    assert tenant.emergency.escalation_phone in result
 
 
 async def test_allow_warm_transfer_false_keeps_voice_on_the_sms_path(hotel, override_tenant):

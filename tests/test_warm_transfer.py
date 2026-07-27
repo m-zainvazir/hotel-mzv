@@ -21,8 +21,21 @@ async def collect(**kwargs):
 # --- escalator selection -----------------------------------------------------
 
 
-def test_voice_gets_a_warm_transfer_escalator_by_default(hotel):
-    assert isinstance(get_escalator(hotel, "voice"), WarmTransferEscalator)
+def _with_warm_transfer_enabled(hotel):
+    """hotel-mzv.json itself has `allow_warm_transfer: false` (no real
+    escalation number provisioned yet — see plans/phase7.md Step 11), so
+    tests of the *enabled* path build an explicit override rather than
+    relying on the fixture's current real-world value, mirroring the
+    existing pattern for the *disabled* tests below."""
+    return hotel.model_copy(
+        update={"emergency": hotel.emergency.model_copy(update={"allow_warm_transfer": True})}
+    )
+
+
+def test_voice_gets_a_warm_transfer_escalator_when_enabled(hotel):
+    assert isinstance(
+        get_escalator(_with_warm_transfer_enabled(hotel), "voice"), WarmTransferEscalator
+    )
 
 
 def test_chat_gets_an_sms_callback_escalator(hotel):
@@ -83,7 +96,12 @@ async def test_chat_emergency_yields_a_handoff_event_with_transfer_false(hotel, 
     assert handoffs[0].is_spoken is False
 
 
-async def test_voice_emergency_yields_handoff_with_destination(hotel, scripted):
+async def test_voice_emergency_yields_handoff_with_destination(hotel, scripted, override_tenant):
+    # stream_turn resolves the tenant by id through get_tenant_config, which
+    # re-reads the repository -- a bare hotel.model_copy(...) here would be
+    # invisible to it; override_tenant registers the override on the
+    # repository itself (see its docstring in conftest.py).
+    override_tenant(_with_warm_transfer_enabled(hotel))
     scripted(
         ai(
             "Stay safe, help is on the way. ",
@@ -121,12 +139,13 @@ def _provisioning_settings(**overrides) -> Settings:
 
 
 def test_payload_declares_transfer_call_tool_when_enabled(hotel):
-    payload = build_assistant_payload(hotel, settings=_provisioning_settings())
+    tenant = _with_warm_transfer_enabled(hotel)
+    payload = build_assistant_payload(tenant, settings=_provisioning_settings())
     tools = payload["model"]["tools"]
     assert tools == [
         {
             "type": "transferCall",
-            "destinations": [{"type": "number", "number": hotel.emergency.escalation_phone}],
+            "destinations": [{"type": "number", "number": tenant.emergency.escalation_phone}],
         }
     ]
 
@@ -140,11 +159,12 @@ def test_payload_omits_transfer_call_tool_when_disabled(hotel):
 
 
 def test_escalation_number_appears_exactly_once_in_the_payload(hotel):
-    payload = build_assistant_payload(hotel, settings=_provisioning_settings())
+    tenant = _with_warm_transfer_enabled(hotel)
+    payload = build_assistant_payload(tenant, settings=_provisioning_settings())
     import json
 
     text = json.dumps(payload)
-    assert text.count(hotel.emergency.escalation_phone) == 1
+    assert text.count(tenant.emergency.escalation_phone) == 1
 
 
 # --- channel-scoped acknowledgements -----------------------------------------

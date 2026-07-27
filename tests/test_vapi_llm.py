@@ -407,10 +407,20 @@ def test_slow_first_token_is_logged_as_a_warning(client, scripted, hotel, caplog
     assert any(r.levelname == "WARNING" and "budget" in r.getMessage() for r in caplog.records)
 
 
-def test_emergency_call_triggers_a_real_transfer_on_voice(client, scripted, hotel):
+def test_emergency_call_triggers_a_real_transfer_on_voice(client, scripted, hotel, override_tenant):
     """End to end on voice: Phase 3's WarmTransferEscalator is live by default,
     so an emergency call both speaks the handoff and emits the transferCall
-    frame — after the spoken content, never before it (see _sse_chunks)."""
+    frame — after the spoken content, never before it (see _sse_chunks).
+
+    hotel-mzv.json itself has `allow_warm_transfer: false` (no real
+    escalation number provisioned yet — plans/phase7.md Step 11), so this
+    registers an explicit override rather than relying on the fixture's
+    current real-world value."""
+    tenant = hotel.model_copy(
+        update={"emergency": hotel.emergency.model_copy(update={"allow_warm_transfer": True})}
+    )
+    override_tenant(tenant)
+
     scripted(
         ai(
             "That sounds dangerous, stay away from it. ",
