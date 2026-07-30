@@ -19,10 +19,20 @@ outside an event loop.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Protocol, runtime_checkable
 
-from app.db.models import Call, ChatMessage, ChatSession, Escalation, Job, OutboundMessage
+from app.db.models import (
+    Call,
+    CallSummary,
+    ChatMessage,
+    ChatSession,
+    DailyMetrics,
+    Escalation,
+    Job,
+    OutboundMessage,
+    TenantMetrics,
+)
 
 
 @runtime_checkable
@@ -108,3 +118,49 @@ class ChatLog(Protocol):
 
     def list_chat_messages(self, tenant_id: str, session_id: str) -> list[ChatMessage]: ...
     async def alist_chat_messages(self, tenant_id: str, session_id: str) -> list[ChatMessage]: ...
+
+    #: Phase 8: the gap that made chat volume uncomputable — there was no way
+    #: to enumerate a tenant's sessions at all, only to fetch one session's
+    #: messages once you already had its id.
+    def list_chat_sessions(
+        self, tenant_id: str, *, limit: int = 50, since: datetime | None = None
+    ) -> list[ChatSession]: ...
+    async def alist_chat_sessions(
+        self, tenant_id: str, *, limit: int = 50, since: datetime | None = None
+    ) -> list[ChatSession]: ...
+
+
+@runtime_checkable
+class AnalyticsStore(Protocol):
+    """Phase 8 — the admin dashboard's read surface.
+
+    `SupabaseStore` reads these through the tenant-scoped JWT and the
+    `security_invoker` views/RPC in `app/db/migrations/0008_analytics.sql`,
+    never the secret key — a cross-tenant rollup is a per-tenant loop over
+    this same protocol, one tenant's JWT at a time. That is what keeps a
+    future logged-in tenant's own read of its own data on the identical code
+    path an operator's read already uses (plans/phase8.md's tenant-login
+    contract).
+    """
+
+    def tenant_metrics(self, tenant_id: str, *, since: date, until: date) -> TenantMetrics: ...
+    async def atenant_metrics(
+        self, tenant_id: str, *, since: date, until: date
+    ) -> TenantMetrics: ...
+
+    def daily_series(self, tenant_id: str, *, since: date, until: date) -> list[DailyMetrics]: ...
+    async def adaily_series(
+        self, tenant_id: str, *, since: date, until: date
+    ) -> list[DailyMetrics]: ...
+
+    #: Deliberately `CallSummary`, not `Call` — never a transcript in a list
+    #: response. `aget_call` below is the only way to reach one.
+    def list_recent_calls(
+        self, tenant_id: str, *, limit: int = 50, since: datetime | None = None
+    ) -> list[CallSummary]: ...
+    async def alist_recent_calls(
+        self, tenant_id: str, *, limit: int = 50, since: datetime | None = None
+    ) -> list[CallSummary]: ...
+
+    def get_call(self, tenant_id: str, call_id: str) -> Call | None: ...
+    async def aget_call(self, tenant_id: str, call_id: str) -> Call | None: ...

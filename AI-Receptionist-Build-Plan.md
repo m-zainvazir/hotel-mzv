@@ -328,6 +328,18 @@ See `plans/phase6.md` for the full implementation record and live-verification c
 
 **Avatar ("my/someone's avatar").** Add a real-time video face with **Tavus** (already integrated with Vapi) or **Simli** (latency-obsessed). This is a presentation layer on top of the same brain and voice — turn it on per tenant as a paid add-on. Build it in a later phase; it changes nothing in the graph.
 
+**Amendment (Phase 8 planning, 28 Jul 2026): "Tavus (already integrated with
+Vapi)" is stale — Vapi discontinued its Tavus integration (Vapi staff, 20
+Jun 2025).** There is no longer a provider-side toggle that adds a face to a
+call. The workable path is now browser-side: Vapi's web SDK exposes a
+public `getDailyCallObject()` and a `'video'` event carrying a
+`MediaStreamTrack`, composed client-side with a service like Simli (which
+mints a short-lived WebRTC session token server-side from an API key + a
+`faceId`) rather than configured as an assistant-level voice provider. This
+also moved the avatar out of Phase 8 itself, by client decision — see
+`plans/phase10.md` item 13 for the current plan, written against this
+corrected premise.
+
 ---
 
 ## 13. Latency budget (target 600–800ms)
@@ -400,7 +412,17 @@ Phased so you always have something runnable. Rough calendar assumes one focused
 
 **Phase 8 — Avatar + polish (optional, 2–4 days).** Tavus/Simli video avatar add-on; analytics dashboard; per-tenant admin. *Done when:* a tenant can appear as a talking avatar.
 
-**Ballpark: a production-grade dual-channel MVP (Phases 0–7) in ~3 weeks; avatar and polish on top.**
+**Amendment (Phase 8 implementation, 28 Jul 2026): scope split by client
+decision.** Analytics + per-tenant admin shipped as Phase 8 (`plans/phase8.md`)
+— an operator dashboard at `/admin` with per-tenant metrics and a real
+config editor, built "operator-only now, designed for tenant login later."
+The video avatar moved out to `plans/phase10.md` item 13, both because the
+client wanted it later and because §12's Tavus premise no longer holds (see
+that section's amendment). *Phase 8's actual done-when:* an operator can see
+what a tenant's receptionist did and change what it says, with the edit
+live on the very next turn — no redeploy.
+
+**Ballpark: a production-grade dual-channel MVP (Phases 0–7) in ~3 weeks; Phase 8 (analytics + admin) and the deferred avatar on top.**
 
 ---
 

@@ -4,7 +4,8 @@ One LangGraph brain, two channels (phone + chat), many tenants. Full spec in
 [`AI-Receptionist-Build-Plan.md`](AI-Receptionist-Build-Plan.md); conventions in
 [`CLAUDE.md`](CLAUDE.md).
 
-**Status: Phases 1–7 complete.** Live on Railway
+**Status: Phases 1–7 complete and deployed; Phase 8 (analytics + per-tenant
+admin) code-complete, pending live migration/deploy.** Live on Railway
 (`us-east4`, Docker, one replica), backed by a Supabase project in
 `us-east-1`. The brain runs on Groq/Gemini with the five
 native tools wired, and is reachable by typed chat, an embeddable chat
@@ -26,7 +27,12 @@ implemented and tested but intentionally left off — parked by client
 decision, not a technical gap. `northside-plumbing` stays on the in-process
 booking logic (durable once Supabase is the store, just no external calendar
 sync) as the second example tenant. Flipping any tenant's provider is a
-one-line JSON edit either way — see `content/README.md`.
+one-line JSON edit either way — see `content/README.md`. An admin dashboard
+at `/admin` now gives an operator per-tenant analytics and a real config
+editor (see "Admin dashboard" below and `plans/phase8.md`) — code-complete
+and fully tested offline, not yet live-verified (its own two new migrations
+aren't applied to the live project yet, same "next manual step" every prior
+phase has left behind).
 
 ## Talk to it — five doors, one brain
 
@@ -106,11 +112,12 @@ Phase 4's cloned voice drops into the same field.
 
 | | |
 |---|---|
-| Dev server | `uvicorn app.main:app --reload` (health: `GET /health`, reports `store`/`checkpointer`/`widget`/`mcp`) — or `python -m uvicorn app.main:app --reload` if Windows Device Guard blocks the `.exe` |
+| Dev server | `uvicorn app.main:app --reload` (health: `GET /health`, reports `store`/`checkpointer`/`widget`/`admin`/`mcp`) — or `python -m uvicorn app.main:app --reload` if Windows Device Guard blocks the `.exe` |
 | Terminal chat | `python -m scripts.chat_cli` |
 | Build the widget | `npm --prefix widget install && npm --prefix widget run build` |
+| Build the admin dashboard | `npm --prefix admin install && npm --prefix admin run build` (needs `ADMIN_ENABLED=true` + `ADMIN_AUTH_TOKEN` to actually use `/admin` — see `admin/README.md`) |
 | Provision voice | `python -m scripts.provision_vapi --tenant <id> [--show\|--dry-run]` |
-| Sync tenant → Supabase | `python -m scripts.sync_tenants [--tenant <id>]` |
+| Sync tenant → Supabase | `python -m scripts.sync_tenants [--tenant <id>] [--force\|--export]` |
 | Onboard a tenant | `python -m scripts.onboard_tenant --config <file.json> [--dry-run]` |
 | Run the demo MCP server | `pip install -e ".[mcp]"` then `python -m scripts.demo_mcp_server --port 8765` |
 | Connect an MCP server to a tenant | `python -m scripts.register_mcp_server --tenant <id> --name <n> --url <url> [--secret <key>] [--list\|--disable\|--remove\|--dry-run]` |
@@ -136,12 +143,15 @@ app/
   tenancy/      models · repository · cached loader · secrets.py · sync.py · voice.py
   db/           models · store protocols · memory_store · supabase_store · factory ·
                 auth.py (RLS JWT) · checkpointer.py (durable Postgres) · migrations/
-  main.py       the one service — CORS, /widget.js, /widget/demo, /health
-scripts/  widget/  infra/  tests/
+  main.py       the one service — CORS, /widget.js, /widget/demo, /health, /admin
+scripts/  widget/  admin/  infra/  tests/
 ```
 
 `widget/` is the embeddable chat widget's own source (Preact + TS, bundled
-with Vite into a single `<script>` file) — see `widget/README.md`.
+with Vite into a single `<script>` file) — see `widget/README.md`. `admin/`
+(Phase 8) is the admin dashboard's source — same stack, but a plain SPA
+build rather than an embed contract, since nothing pastes a `<script>` tag
+pointing at it — see `admin/README.md`.
 
 ## How a turn flows
 
@@ -266,7 +276,7 @@ second example tenant.
 |---|---|
 | Scheduling: real Cal.com calendar for hotel-mzv; hours/lead-time/conflicts logic (durable, DB-backed once Supabase is the store) for any tenant on `"stub"` (northside-plumbing) | The calendar *itself*, for tenants on `"stub"` |
 | Emergency detection; Vapi warm transfer (voice, on by default once a tenant has an `escalation_phone`) | The SMS alert/confirmation leg — no tenant has `notifications.provider: "twilio"` yet |
-| Storage: jobs/calls/messages/escalations in Supabase Postgres with real RLS, per-tenant secrets in Vault, a durable checkpointer | Tenant *config* still reads from JSON files — Supabase's `tenants`/`services` tables exist and stay synced (`sync_tenants.py`) but nothing queries them yet |
+| Storage: jobs/calls/messages/escalations in Supabase Postgres with real RLS, per-tenant secrets in Vault, a durable checkpointer | Tenant *config* still reads from JSON files **by default** — `TENANT_SOURCE=supabase` (Phase 8) makes the flip real, required once `ADMIN_ENABLED=true`, but not yet live-verified against the real project |
 | Voice: streaming, tenancy, call records, provisioning; consent enforcement (Python + a DB trigger) | The actual voice clone — no tenant has a real cloned `voice_id` yet, needs an audio sample + written consent |
 | Per-tenant Cal.com/Twilio credentials via Vault, live-verified | A second real Cal.com account, to prove two tenants booking into two different calendars end-to-end (currently only credential *resolution* is proven, not a full live booking) |
 | Chat widget: handshake, streaming, quick replies, event filtering, CORS — live-verified end to end against real Gemini + Cal.com | `chat_sessions`/`chat_messages` (`app/db/migrations/0006_chat.sql`) — written and offline-tested, but not yet applied to a live project; until then transcript writes fail (caught, logged, never break the stream) and every conversation lives only in the checkpointer |
@@ -294,13 +304,60 @@ API rejects as a real destination — one JSON edit + a `provision_vapi`
 re-run once a real number exists). No phone number attached yet (web-call
 only) and Twilio stays parked — both are the client's call.
 
+## Admin dashboard (Phase 8) — code-complete
+
+`plans/phase8.md` is the full plan. An operator surface at `/admin` —
+per-tenant analytics (calls, chat volume, bookings, escalations, cost — see
+the caveat below) and a real config editor, replacing "edit
+`content/tenants/*.json`, commit, redeploy" with a form that takes effect on
+the very next turn. Same-origin, no CORS involved, served from the one app
+(`app/main.py`'s guarded `StaticFiles` mount + SPA catch-all).
+
+**Fails closed, not open — the one deliberate exception in this codebase's
+security posture.** `ADMIN_ENABLED=false` by default (every route 404s);
+`ADMIN_AUTH_TOKEN` unset means every request 401s, unlike every other secret
+in this app. `app/preflight.py` refuses `ADMIN_ENABLED=true` in production
+without a real `ADMIN_AUTH_TOKEN` (32+ chars) and without `TENANT_SOURCE=supabase`
+— the latter isn't a style preference: an admin panel editing config while
+the app still reads `content/tenants/*.json` produces edits that reach
+Postgres and never reach the bot ("the phantom edit" — see `plans/phase8.md`).
+
+**Built "operator-only now, designed for tenant login later"**: an
+`AdminPrincipal` abstraction, the tenant id always in the URL path, and
+every analytics read already going through the same tenant-scoped JWT a
+future logged-in tenant's own reads would use — so that flip
+(`plans/phase10.md` item 14) is additive, not a rewrite.
+
+**Nothing here touches the brain.** It's a new read/write surface over
+tenant config and existing storage — `app/brain/` is unmodified.
+
+Not yet live-verified: `0008_analytics.sql` and `0009_admin.sql` aren't
+applied to the live Supabase project, so `/admin/api/overview`'s per-tenant
+metrics currently degrade cleanly (a per-tenant "failed to load", proven
+against the real project, not just offline) until that migration step
+happens — same "apply the SQL by hand" step every prior phase has needed.
+There's also no per-tenant LLM cost or per-turn latency anywhere in this
+app (`app/brain/metrics.py` is process-global by design), so the dashboard
+doesn't show either — the "Vapi telephony cost" tile is exactly that, not a
+total cost figure.
+
 ## Security
 
 `.env`, `apis.md` and credential files are gitignored. Secrets belong in env
 vars / Supabase Vault, never in code. Voice cloning requires stored written
 consent — no exceptions.
 
-One chat-widget note, then two voice-specific ones:
+One admin note, one chat-widget note, then two voice-specific ones:
+
+* **`ADMIN_AUTH_TOKEN` has the largest blast radius of any secret in this
+  app** — full read of every call/chat transcript, full write of every
+  tenant's config, including `emergency.escalation_phone` (redirects
+  emergencies) and `booking.event_type_id` (redirects bookings to a
+  different calendar). Never reuse `API_AUTH_TOKEN` for it — that token's
+  power is "run a conversation as any tenant", and conflating the two would
+  silently promote every existing holder (dev boxes, `chat_cli`, tests, CI)
+  to full admin. Rotate it, keep the holder list short, and set
+  `ADMIN_ENABLED=false` on any box that doesn't need the surface at all.
 
 * **The widget session token (`app/channels/widget_auth.py`) is the real
   tenancy boundary for `/chat`**, not `API_AUTH_TOKEN` (a browser can't hold a

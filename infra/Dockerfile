@@ -56,6 +56,14 @@ COPY content ./content
 # this image; only the already-built output + the static demo page ship.
 COPY widget/dist ./widget/dist
 COPY widget/demo.html ./widget/demo.html
+# Same story for the admin dashboard (Phase 8) — built on the host
+# (npm --prefix admin run build), committed, no Node in this image. Unlike
+# widget/dist this COPY failing (bundle not built) fails the image build
+# outright rather than degrading to a 404 — app/main.py guards the
+# StaticFiles mount itself for the "built the image without building the
+# bundle first" case in dev, but a committed repo should never be in that
+# state at build time.
+COPY admin/dist ./admin/dist
 
 # --no-deps: every real dependency already came from the lockfile above.
 # This installs only the ai-receptionist package itself (console scripts,

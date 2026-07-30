@@ -1,0 +1,23 @@
+{
+  "name": "ai-receptionist-admin",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Admin dashboard — analytics + per-tenant config editing at /admin, served same-origin from the one FastAPI app.",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build && node scripts/buildhash.mjs",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "preact": "^10.24.3"
+  },
+  "devDependencies": {
+    "@preact/preset-vite": "^2.9.3",
+    "typescript": "^5.7.2",
+    "vite": "5.4.21"
+  },
+  "overrides": {
+    "rollup": "4.62.2"
+  }
+}

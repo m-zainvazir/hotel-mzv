@@ -8,18 +8,21 @@ rather than only after Phase 4.
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import datetime
+from datetime import date, datetime
 from functools import lru_cache
 from threading import RLock
 
 from app.db.models import (
     Call,
+    CallSummary,
     ChatMessage,
     ChatSession,
+    DailyMetrics,
     Escalation,
     Job,
     JobStatus,
     OutboundMessage,
+    TenantMetrics,
 )
 
 
@@ -194,6 +197,125 @@ class InMemoryStore:
     async def alist_chat_messages(self, tenant_id: str, session_id: str) -> list[ChatMessage]:
         return self.list_chat_messages(tenant_id, session_id)
 
+    def list_chat_sessions(
+        self, tenant_id: str, *, limit: int = 50, since: datetime | None = None
+    ) -> list[ChatSession]:
+        with self._lock:
+            sessions = list(self._chat_sessions[tenant_id].values())
+        if since is not None:
+            sessions = [s for s in sessions if s.started_at >= since]
+        return sorted(sessions, key=lambda s: s.started_at, reverse=True)[:limit]
+
+    async def alist_chat_sessions(
+        self, tenant_id: str, *, limit: int = 50, since: datetime | None = None
+    ) -> list[ChatSession]:
+        return self.list_chat_sessions(tenant_id, limit=limit, since=since)
+
+    # --- analytics (Phase 8) ------------------------------------------------
+    #
+    # Python-side aggregation is fine here — it's the in-memory dev/test
+    # store, not the network-bound SupabaseStore the plan's "rejected"
+    # options were actually about. Every method walks the same five
+    # collections `reset()` already clears.
+
+    def tenant_metrics(self, tenant_id: str, *, since: date, until: date) -> TenantMetrics:
+        with self._lock:
+            calls = [
+                c for c in self._calls[tenant_id].values() if since <= c.created_at.date() <= until
+            ]
+            # "Bookings", not "booking attempts": a cancelled job doesn't
+            # count, the same distinction 0008_analytics.sql's SQL applies.
+            jobs = [
+                j
+                for j in self._jobs[tenant_id].values()
+                if since <= j.created_at.date() <= until and j.status is not JobStatus.CANCELLED
+            ]
+            escalations = [
+                e for e in self._escalations[tenant_id] if since <= e.created_at.date() <= until
+            ]
+            chat_sessions = [
+                s
+                for s in self._chat_sessions[tenant_id].values()
+                if since <= s.started_at.date() <= until
+            ]
+            chat_messages = [
+                m for m in self._chat_messages[tenant_id] if since <= m.created_at.date() <= until
+            ]
+        return TenantMetrics(
+            tenant_id=tenant_id,
+            calls=len(calls),
+            call_seconds=sum(c.duration_seconds or 0.0 for c in calls),
+            cost_usd=sum(c.cost_usd or 0.0 for c in calls),
+            jobs=len(jobs),
+            escalations=len(escalations),
+            chat_sessions=len(chat_sessions),
+            chat_messages=len(chat_messages),
+        )
+
+    async def atenant_metrics(self, tenant_id: str, *, since: date, until: date) -> TenantMetrics:
+        return self.tenant_metrics(tenant_id, since=since, until=until)
+
+    def daily_series(self, tenant_id: str, *, since: date, until: date) -> list[DailyMetrics]:
+        buckets: dict[date, DailyMetrics] = {}
+
+        def _bucket(day: date) -> DailyMetrics:
+            if day not in buckets:
+                buckets[day] = DailyMetrics(day=day)
+            return buckets[day]
+
+        with self._lock:
+            for call in self._calls[tenant_id].values():
+                day = call.created_at.date()
+                if since <= day <= until:
+                    bucket = _bucket(day)
+                    bucket.calls += 1
+                    bucket.call_seconds += call.duration_seconds or 0.0
+                    bucket.cost_usd += call.cost_usd or 0.0
+            for job in self._jobs[tenant_id].values():
+                day = job.created_at.date()
+                if since <= day <= until and job.status is not JobStatus.CANCELLED:
+                    _bucket(day).jobs += 1
+            for escalation in self._escalations[tenant_id]:
+                day = escalation.created_at.date()
+                if since <= day <= until:
+                    _bucket(day).escalations += 1
+            for session in self._chat_sessions[tenant_id].values():
+                day = session.started_at.date()
+                if since <= day <= until:
+                    _bucket(day).chat_sessions += 1
+            for message in self._chat_messages[tenant_id]:
+                day = message.created_at.date()
+                if since <= day <= until:
+                    _bucket(day).chat_messages += 1
+
+        return [buckets[day] for day in sorted(buckets)]
+
+    async def adaily_series(
+        self, tenant_id: str, *, since: date, until: date
+    ) -> list[DailyMetrics]:
+        return self.daily_series(tenant_id, since=since, until=until)
+
+    def list_recent_calls(
+        self, tenant_id: str, *, limit: int = 50, since: datetime | None = None
+    ) -> list[CallSummary]:
+        calls = self.list_calls(tenant_id)
+        if since is not None:
+            calls = [c for c in calls if c.created_at >= since]
+        calls = sorted(calls, key=lambda c: c.created_at, reverse=True)[:limit]
+        return [_call_summary(c) for c in calls]
+
+    async def alist_recent_calls(
+        self, tenant_id: str, *, limit: int = 50, since: datetime | None = None
+    ) -> list[CallSummary]:
+        return self.list_recent_calls(tenant_id, limit=limit, since=since)
+
+    def get_call(self, tenant_id: str, call_id: str) -> Call | None:
+        with self._lock:
+            return self._calls[tenant_id].get(call_id)
+
+    async def aget_call(self, tenant_id: str, call_id: str) -> Call | None:
+        return self.get_call(tenant_id, call_id)
+
     # --- test helper -------------------------------------------------------
 
     def reset(self) -> None:
@@ -204,6 +326,23 @@ class InMemoryStore:
             self._calls.clear()
             self._chat_sessions.clear()
             self._chat_messages.clear()
+
+
+def _call_summary(call: Call) -> CallSummary:
+    return CallSummary(
+        id=call.id,
+        tenant_id=call.tenant_id,
+        provider_call_id=call.provider_call_id,
+        from_number=call.from_number,
+        to_number=call.to_number,
+        started_at=call.started_at,
+        ended_at=call.ended_at,
+        duration_seconds=call.duration_seconds,
+        ended_reason=call.ended_reason,
+        cost_usd=call.cost_usd,
+        channel=call.channel,
+        created_at=call.created_at,
+    )
 
 
 @lru_cache(maxsize=1)

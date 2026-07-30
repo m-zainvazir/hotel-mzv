@@ -69,6 +69,34 @@ def verify_production_settings(settings: Settings) -> list[str]:
             "SUPABASE_URL is set but SUPABASE_JWT_SECRET is unset — the first "
             "tenant-scoped query would fail with SupabaseAuthNotConfiguredError."
         )
+    if settings.tenant_source == "supabase" and not settings.supabase_url:
+        problems.append(
+            "TENANT_SOURCE=supabase but SUPABASE_URL is unset — there is no "
+            "registry to load tenants from."
+        )
+    if settings.admin_enabled and not settings.admin_auth_token:
+        problems.append(
+            "ADMIN_ENABLED=true but ADMIN_AUTH_TOKEN is unset — every admin "
+            "request would 401 (app/channels/admin_auth.py fails closed, "
+            "unlike every other guard in this app)."
+        )
+    if settings.admin_auth_token and len(settings.admin_auth_token) < 32:
+        problems.append(
+            "ADMIN_AUTH_TOKEN is shorter than 32 characters — this bearer has "
+            "the largest blast radius of any secret in the app (full "
+            "transcript read, full tenant-config write)."
+        )
+    if settings.admin_enabled and settings.tenant_source == "json":
+        # The phantom edit (plans/phase8.md): an admin write reaches
+        # Postgres via sync_tenant() and returns 200, but the running app
+        # keeps reading content/tenants/*.json, so the receptionist never
+        # sees the change. Both halves work perfectly in isolation, so
+        # nothing else would ever catch this.
+        problems.append(
+            "ADMIN_ENABLED=true but TENANT_SOURCE=json — an admin edit would "
+            "write to Supabase and never reach the running app, which keeps "
+            "reading content/tenants/*.json. Set TENANT_SOURCE=supabase."
+        )
 
     key_field = _PROVIDER_API_KEY_FIELDS.get(settings.llm_provider)
     if key_field and not getattr(settings, key_field, None):

@@ -205,9 +205,19 @@ def no_network(monkeypatch):
 @pytest.fixture(autouse=True)
 def isolated_runtime():
     """Every test starts with an empty store, cold caches and no LLM override."""
+    from app.tenancy import loader
+
     reset_settings_cache()
     get_store().reset()
     clear_tenant_cache()
+    # Phase 8: nothing else resets the module-global repository between
+    # tests — only `override_tenant` saves/restores it, opt-in per test. The
+    # moment any test installs a SupabaseTenantRepository (or any other
+    # double) and forgets to restore it, every later test in the session
+    # silently inherits it, and `no_network` above turns that into dozens of
+    # unrelated failures with a misleading message. Force every test back to
+    # the default JsonFileTenantRepository.
+    loader.set_repository(None)
     reset_provider_overrides()
     # Tests must never depend on a committed tenant's `booking.provider` —
     # pin every real tenant (hotel-mzv, northside-plumbing) to the in-process
@@ -232,6 +242,7 @@ def isolated_runtime():
     yield
     reset_settings_cache()
     get_store().reset()
+    loader.set_repository(None)
     reset_graph()
     set_llm_override(None)
     reset_provider_overrides()

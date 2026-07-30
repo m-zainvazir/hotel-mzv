@@ -9,7 +9,7 @@ from __future__ import annotations
 import re
 from datetime import date, datetime, time
 from typing import Literal
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -269,7 +269,16 @@ class TenantConfig(BaseModel):
     @field_validator("timezone")
     @classmethod
     def _real_timezone(cls, value: str) -> str:
-        ZoneInfo(value)  # raises if the tz database doesn't know it
+        try:
+            ZoneInfo(value)
+        except ZoneInfoNotFoundError as exc:
+            # ZoneInfoNotFoundError subclasses KeyError, which Pydantic does
+            # NOT catch and wrap into a ValidationError the way it does
+            # ValueError/TypeError/AssertionError — left alone, a bad
+            # timezone through any live API (Phase 8's admin write path is
+            # the first thing that actually exposes this) would 500 instead
+            # of producing the clean 422 every other validator here does.
+            raise ValueError(f"unknown timezone: {value!r}") from exc
         return value
 
     @model_validator(mode="after")

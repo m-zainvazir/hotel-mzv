@@ -22,14 +22,24 @@ PostgREST semantics worth knowing before touching this file:
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 import httpx
 
 from app.config import get_settings
 from app.db.auth import tenant_jwt
-from app.db.models import Call, ChatMessage, ChatSession, Escalation, Job, OutboundMessage
+from app.db.models import (
+    Call,
+    CallSummary,
+    ChatMessage,
+    ChatSession,
+    DailyMetrics,
+    Escalation,
+    Job,
+    OutboundMessage,
+    TenantMetrics,
+)
 
 
 class SupabaseStoreError(RuntimeError):
@@ -338,6 +348,131 @@ class SupabaseStore:
         )
         return [_row_to_chat_message(row) for row in _rows(response)]
 
+    async def alist_chat_sessions(
+        self, tenant_id: str, *, limit: int = 50, since: datetime | None = None
+    ) -> list[ChatSession]:
+        """Phase 8: the method that makes chat volume enumerable at all —
+        `alist_chat_messages` above requires a `session_id` you'd have no way
+        to obtain without this."""
+        query: list[tuple[str, str]] = [
+            ("tenant_id", f"eq.{tenant_id}"),
+            ("order", "started_at.desc"),
+            ("limit", str(limit)),
+        ]
+        if since is not None:
+            query.append(("started_at", f"gte.{since.isoformat()}"))
+        response = await self._request("GET", "/chat_sessions", tenant_id=tenant_id, params=query)
+        return [_row_to_chat_session(row) for row in _rows(response)]
+
+    # --- analytics (Phase 8) ---------------------------------------------
+    #
+    # Every read below goes through the tenant-scoped JWT `_request` already
+    # mints, hitting the `security_invoker` views/RPC in
+    # app/db/migrations/0008_analytics.sql — never the secret key. That is
+    # what makes a future logged-in tenant's own read of its own metrics run
+    # the identical code path an operator's cross-tenant loop already uses
+    # (plans/phase8.md's tenant-login contract).
+
+    async def atenant_metrics(self, tenant_id: str, *, since: date, until: date) -> TenantMetrics:
+        response = await self._request(
+            "POST",
+            "/rpc/tenant_metrics",
+            tenant_id=tenant_id,
+            json_body={"from_day": since.isoformat(), "to_day": until.isoformat()},
+        )
+        rows = _rows(response)
+        if not rows:
+            return TenantMetrics(tenant_id=tenant_id)
+        return _row_to_tenant_metrics(rows[0])
+
+    async def adaily_series(
+        self, tenant_id: str, *, since: date, until: date
+    ) -> list[DailyMetrics]:
+        # Four views, not one RPC: each is independently useful (the admin
+        # API's breakdown panels query them directly too), and merging four
+        # small per-tenant result sets client-side is cheaper than a fifth
+        # bespoke "daily bundle" database object to keep in sync with them.
+        query: list[tuple[str, str]] = [
+            ("tenant_id", f"eq.{tenant_id}"),
+            ("day", f"gte.{since.isoformat()}"),
+            ("day", f"lte.{until.isoformat()}"),
+        ]
+        call_rows = _rows(
+            await self._request("GET", "/daily_call_stats", tenant_id=tenant_id, params=query)
+        )
+        job_rows = _rows(
+            await self._request("GET", "/daily_job_stats", tenant_id=tenant_id, params=query)
+        )
+        chat_rows = _rows(
+            await self._request("GET", "/daily_chat_stats", tenant_id=tenant_id, params=query)
+        )
+        escalation_rows = _rows(
+            await self._request(
+                "GET", "/daily_escalation_stats", tenant_id=tenant_id, params=query
+            )
+        )
+
+        buckets: dict[date, DailyMetrics] = {}
+
+        def _bucket(day_value: str) -> DailyMetrics:
+            day = date.fromisoformat(str(day_value)[:10])
+            if day not in buckets:
+                buckets[day] = DailyMetrics(day=day)
+            return buckets[day]
+
+        for row in call_rows:
+            bucket = _bucket(row["day"])
+            bucket.calls += row.get("calls") or 0
+            bucket.call_seconds += row.get("total_seconds") or 0.0
+            bucket.cost_usd += row.get("cost_usd") or 0.0
+        for row in job_rows:
+            # daily_job_stats has one row per (day, status, channel) —
+            # summing across every row for the same day gives the total, but
+            # "bookings" means "still stands": a cancelled job doesn't count,
+            # the same distinction the tenant_metrics() RPC applies.
+            if row.get("status") == "cancelled":
+                continue
+            _bucket(row["day"]).jobs += row.get("jobs") or 0
+        for row in chat_rows:
+            bucket = _bucket(row["day"])
+            bucket.chat_sessions += row.get("sessions") or 0
+            bucket.chat_messages += row.get("messages") or 0
+        for row in escalation_rows:
+            _bucket(row["day"]).escalations += row.get("escalations") or 0
+
+        return [buckets[day] for day in sorted(buckets)]
+
+    async def alist_recent_calls(
+        self, tenant_id: str, *, limit: int = 50, since: datetime | None = None
+    ) -> list[CallSummary]:
+        # Excluding transcript/recording_url in `select=` means they never
+        # leave the database at all — a stronger guarantee than dropping
+        # them client-side after the fact.
+        query: list[tuple[str, str]] = [
+            ("tenant_id", f"eq.{tenant_id}"),
+            (
+                "select",
+                "id,tenant_id,provider_call_id,from_number,to_number,started_at,"
+                "ended_at,duration_seconds,ended_reason,cost_usd,channel,created_at",
+            ),
+            ("order", "created_at.desc"),
+            ("limit", str(limit)),
+        ]
+        if since is not None:
+            query.append(("created_at", f"gte.{since.isoformat()}"))
+        response = await self._request("GET", "/calls", tenant_id=tenant_id, params=query)
+        return [_row_to_call_summary(row) for row in _rows(response)]
+
+    async def aget_call(self, tenant_id: str, call_id: str) -> Call | None:
+        response = await self._request(
+            "GET",
+            "/calls",
+            tenant_id=tenant_id,
+            params={"tenant_id": f"eq.{tenant_id}", "id": f"eq.{call_id}", "limit": "1"},
+        )
+        rows = _rows(response)
+        return _row_to_call(rows[0]) if rows else None
+
 
 # --- row <-> model mapping ---------------------------------------------------
 
@@ -513,4 +648,34 @@ def _row_to_chat_message(row: dict[str, Any]) -> ChatMessage:
         role=row["role"],
         content=row["content"],
         created_at=row["created_at"],
+    )
+
+
+def _row_to_call_summary(row: dict[str, Any]) -> CallSummary:
+    return CallSummary(
+        id=row["id"],
+        tenant_id=row["tenant_id"],
+        provider_call_id=row["provider_call_id"],
+        from_number=row.get("from_number"),
+        to_number=row.get("to_number"),
+        started_at=row.get("started_at"),
+        ended_at=row.get("ended_at"),
+        duration_seconds=row.get("duration_seconds"),
+        ended_reason=row.get("ended_reason"),
+        cost_usd=row.get("cost_usd"),
+        channel=row["channel"],
+        created_at=row["created_at"],
+    )
+
+
+def _row_to_tenant_metrics(row: dict[str, Any]) -> TenantMetrics:
+    return TenantMetrics(
+        tenant_id=row["tenant_id"],
+        calls=row.get("calls") or 0,
+        call_seconds=row.get("call_seconds") or 0.0,
+        cost_usd=row.get("cost_usd") or 0.0,
+        jobs=row.get("jobs") or 0,
+        escalations=row.get("escalations") or 0,
+        chat_sessions=row.get("chat_sessions") or 0,
+        chat_messages=row.get("chat_messages") or 0,
     )

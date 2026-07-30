@@ -8,7 +8,7 @@ what the Phase 4 tables will mirror.
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from enum import StrEnum
 from typing import Literal
 
@@ -130,4 +130,67 @@ class Escalation(BaseModel):
     caller_summary: str = ""
     callback_number: str | None = None
     channel: str = "chat"
+    created_at: datetime = Field(default_factory=_utcnow)
+
+
+# --- analytics (Phase 8) -----------------------------------------------------
+#
+# Deliberately no per-tenant LLM cost or per-turn latency here — app/brain/
+# metrics.py is process-global by design (its own docstring records that the
+# ContextVar fix already failed), so that number isn't available and these
+# models must not imply it is.
+
+
+class TenantMetrics(BaseModel):
+    """One tenant's totals over a caller-chosen window — the windowed bundle
+    `public.tenant_metrics(from_day, to_day)` returns in one round trip."""
+
+    tenant_id: str
+    calls: int = 0
+    call_seconds: float = 0.0
+    #: Vapi telephony cost only — labelled narrowly on purpose in the
+    #: dashboard, since showing *some* cost invites the reader to believe
+    #: it's *the* cost (there is no LLM cost here).
+    cost_usd: float = 0.0
+    jobs: int = 0
+    escalations: int = 0
+    chat_sessions: int = 0
+    chat_messages: int = 0
+
+
+class DailyMetrics(BaseModel):
+    """One day's row in a time-series chart — the same fields as
+    `TenantMetrics`, bucketed by day instead of summed over the whole window.
+    Mutable (unlike the frozen tenant-config models): store aggregation
+    builds these up field-by-field as it walks rows/views."""
+
+    day: date
+    calls: int = 0
+    call_seconds: float = 0.0
+    cost_usd: float = 0.0
+    jobs: int = 0
+    escalations: int = 0
+    chat_sessions: int = 0
+    chat_messages: int = 0
+
+
+class CallSummary(BaseModel):
+    """`Call` minus `transcript`/`recording_url` — the list-shaped analytics
+    surface is PII-free *by construction*, not by convention: on
+    `SupabaseStore` the excluded columns never leave the database at all
+    (see `alist_recent_calls`'s explicit `select=`). `aget_call` is the only
+    route to a transcript, one call at a time, on an explicit operator
+    action."""
+
+    id: str
+    tenant_id: str
+    provider_call_id: str
+    from_number: str | None = None
+    to_number: str | None = None
+    started_at: datetime | None = None
+    ended_at: datetime | None = None
+    duration_seconds: float | None = None
+    ended_reason: str | None = None
+    cost_usd: float | None = None
+    channel: str = "voice"
     created_at: datetime = Field(default_factory=_utcnow)

@@ -138,3 +138,26 @@ async def enforce_chat_rate_limit(
     )
     if tenant_retry is not None:
         raise _too_many_requests(tenant_retry)
+
+
+async def enforce_admin_rate_limit(request: Request) -> None:
+    """`/admin/api/*` (Phase 8) — a generous per-IP ceiling on top of
+    `require_admin`'s auth check. Not exempt for anyone, unlike the chat
+    routes' trusted-caller exemption: there the exemption applies because a
+    trusted caller already holds the same class of secret those routes are
+    gated by, but here the admin bearer itself *is* that secret — nothing
+    to exempt it from. `/admin/api/overview` fans out N per-tenant round
+    trips per call, and the analytics endpoints query the same free-tier
+    Supabase project that answers phone calls, so this exists to stop a
+    dashboard left open on auto-refresh from starving booking traffic."""
+    settings = get_settings()
+    if not settings.rate_limit_enabled:
+        return
+    retry_after = _hit(
+        "admin-ip",
+        _client_ip(request),
+        limit=settings.admin_requests_per_minute,
+        window_seconds=60.0,
+    )
+    if retry_after is not None:
+        raise _too_many_requests(retry_after)

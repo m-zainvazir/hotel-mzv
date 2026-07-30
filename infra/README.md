@@ -41,9 +41,10 @@ exactly the kind of thing worth a second look, not just patch-level noise).
 ## What ships in the image vs. what doesn't
 
 `app/`, `scripts/`, `content/` (tenant configs + prompt — read from disk at
-runtime, so it must ship), and `widget/dist/widget.js` + `.buildhash` (built
-on the host via `npm --prefix widget run build` and committed — no Node in
-this image). `tests/` and `.venv/` never ship — see `.dockerignore`.
+runtime, so it must ship), `widget/dist/widget.js` + `.buildhash`, and
+`admin/dist/` (Phase 8) — all three built on the host (`npm --prefix widget
+run build`, `npm --prefix admin run build`) and committed; no Node in this
+image. `tests/` and `.venv/` never ship — see `.dockerignore`.
 
 ## Required environment (platform secrets, never baked into the image)
 
@@ -54,6 +55,16 @@ refuses to boot without: `API_AUTH_TOKEN`, `VAPI_WEBHOOK_SECRET`,
 active `LLM_PROVIDER`. `DATABASE_URL` unset stays a *warning* — the
 checkpointer degrades to in-memory rather than failing the boot; check
 `/health`'s `problems` field for that, not the preflight.
+
+**Admin dashboard (Phase 8), if you're turning it on:** `ADMIN_ENABLED=true`
+needs `ADMIN_AUTH_TOKEN` (32+ chars — preflight refuses anything shorter)
+**and** `TENANT_SOURCE=supabase`, both fatal if missing. The `TENANT_SOURCE`
+requirement isn't a style preference: an admin panel editing config while
+the app still reads `content/tenants/*.json` produces edits that reach
+Postgres and never reach the running bot ("the phantom edit" —
+`plans/phase8.md`). Set `ADMIN_ENABLED=false` (the default) on any
+deployment that doesn't need the surface — that's what keeps the whole admin
+API 404ing rather than needing its own network-level lockdown.
 
 `DATABASE_URL` must be the Supavisor **session-mode pooler**,
 `aws-0-<region>.pooler.supabase.com:5432` — never the direct

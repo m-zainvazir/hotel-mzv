@@ -143,11 +143,21 @@ class Settings(BaseSettings):
     supabase_timeout_seconds: float = 8.0
     #: TTL for cached per-tenant secrets read from Vault (`app/tenancy/secrets.py`).
     secret_cache_ttl_seconds: int = 300
-    #: Which tenant repository backs `app/tenancy/loader.py`. Stays "json" by
-    #: default even once Supabase is configured — see plan's "On the tenant
-    #: read path" note; flipping to "supabase" is a one-line config change
-    #: made only after Step 4 is verified live.
+    #: Which tenant repository backs `app/tenancy/loader.py`. Pulled forward
+    #: to "supabase" in production by Phase 8: an admin panel that edits
+    #: config while this stays "json" produces the phantom edit
+    #: (app/preflight.py refuses that combination). "json" stays the default
+    #: because it's what every test and dev box needs — see
+    #: `content/tenants/*.json`, now seed + boot fallback rather than runtime
+    #: truth once this is "supabase".
     tenant_source: Literal["json", "supabase"] = "json"
+    #: How often `SupabaseTenantRepository` (Phase 8) re-loads the whole
+    #: tenant registry in the background, on top of the explicit refresh an
+    #: admin write triggers. Not a latency knob — it's the self-healing path
+    #: after a wholesale load failure, and the only way a direct SQL/
+    #: `sync_tenants.py` edit (bypassing the admin API) is ever picked up by
+    #: a running server. 0 disables the background loop.
+    tenant_snapshot_refresh_seconds: int = 300
     #: Supavisor SESSION-mode pooler URI (port 5432, not 6543) for the
     #: LangGraph Postgres checkpointer. Unset means `InMemorySaver` stays
     #: active. Never the direct `db.<ref>.supabase.co` host — it is IPv6-only.
@@ -215,6 +225,21 @@ class Settings(BaseSettings):
     chat_requests_per_day: int = 200
     #: Per widget session, on /chat only.
     session_requests_per_hour: int = 30
+
+    # --- admin dashboard (Phase 8) -------------------------------------------
+    #: Router is only mounted when this is true (a 404, not a 401, when it
+    #: isn't) — makes "is admin exposed?" a grep for one env var rather than
+    #: an inference from token presence.
+    admin_enabled: bool = False
+    #: Deliberately separate from API_AUTH_TOKEN — that token's power is "run
+    #: a conversation as any tenant"; this one's is "rewrite any tenant's
+    #: config and read every transcript". Unlike every other secret in this
+    #: file, an unset value here means 401 on every request, not fail-open —
+    #: see app/channels/admin_auth.py.
+    admin_auth_token: str | None = None
+    #: Per-IP ceiling on /admin/api/*, generous relative to the chat limits
+    #: since a single operator is the expected caller, not the public.
+    admin_requests_per_minute: int = 120
 
     # --- observability: LangSmith (Phase 7 Step 7) --------------------------
     #: These three were always in .env.example, but were never real Settings

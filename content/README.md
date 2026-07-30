@@ -43,21 +43,46 @@ python -m scripts.provision_vapi --tenant hotel-mzv
 
 Plain chat needs nothing — just send the next message.
 
-## Syncing a tenant file to Supabase (Phase 4)
-
-The brain still reads tenant config from these JSON files, not Supabase —
-that hasn't changed. But Supabase's `tenants`/`services` tables exist
-alongside them (for onboarding + the eventual read-path flip), and they only
-update when you tell them to:
+## Syncing a tenant file to Supabase, and which one is actually "true" (Phase 4 → Phase 8)
 
 ```
 python -m scripts.sync_tenants --tenant hotel-mzv    # one tenant
 python -m scripts.sync_tenants                        # every tenant
 ```
 
-Safe to run any time — it's an upsert, and skipping it costs you nothing
-today (nothing reads those tables yet). Needs `SUPABASE_URL` +
-`SUPABASE_SECRET_KEY` in `.env`.
+**Read this before editing a tenant file if `ADMIN_ENABLED=true` anywhere.**
+Whether these JSON files are still the bot's actual source of truth depends
+entirely on `TENANT_SOURCE` in `.env`:
+
+- **`TENANT_SOURCE=json` (dev/local default).** These files are exactly what
+  you think they are — edit one, the next turn uses it, no restart. Running
+  `sync_tenants` afterward is optional bookkeeping (it pushes a copy into
+  Supabase's `tenants`/`services` tables so onboarding/audit data stays
+  current), and skipping it costs nothing: nothing reads those tables in
+  this mode.
+- **`TENANT_SOURCE=supabase` (what production needs once the Phase 8 admin
+  panel is turned on).** These JSON files become **seed data and a
+  degraded-mode fallback only** — the running app loads its tenant registry
+  from Supabase at boot and serves *that*, refreshing on an admin panel save
+  and periodically in the background (`TENANT_SNAPSHOT_REFRESH_SECONDS`).
+  Editing a JSON file in this mode does **nothing** until you run
+  `sync_tenants` to push it — and even then, whoever's driving the admin
+  panel might not know you did, and vice versa.
+
+**The trap to avoid — don't "fix" a panel edit by running `sync_tenants`.**
+An operator changes a tenant's greeting in the admin panel; running
+`sync_tenants` afterward (because the JSON file "looks stale" or out of
+habit) blind-upserts the *old* JSON content back over Supabase, silently
+reverting the panel's edit. `sync_tenants` refuses to run against a
+`TENANT_SOURCE=supabase` project without `--force`, precisely so this isn't
+an accident — if you genuinely mean to overwrite live config with what's on
+disk, `--force` says so out loud. Going the other direction — pulling live
+config back down into the JSON files so they stop being stale, e.g. before a
+commit — is `sync_tenants --export`.
+
+Either way, `sync_tenants` needs `SUPABASE_URL` + `SUPABASE_SECRET_KEY` in
+`.env`. See `plans/phase8.md` ("the phantom edit" / "the sync stomp") for the
+full reasoning.
 
 ## Giving a tenant its own Cal.com / Twilio credentials (Phase 4)
 

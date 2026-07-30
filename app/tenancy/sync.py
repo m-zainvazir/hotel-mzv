@@ -16,6 +16,7 @@ two scripts can't drift into writing the row shape differently.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -66,6 +67,11 @@ def _tenant_row(tenant: TenantConfig) -> dict[str, Any]:
         "phone_numbers": tenant.phone_numbers,
         "widget_keys": tenant.widget_keys,
         "config": config,
+        # Phase 8: set explicitly here, not by a trigger — 0005_voice_consent.sql
+        # already shows triggers on this table have teeth, and this is the
+        # version token app/tenancy/admin.py's optimistic concurrency check
+        # compares against (0009_admin.sql adds the column).
+        "updated_at": datetime.now(UTC).isoformat(),
     }
 
 
@@ -150,6 +156,44 @@ async def sync_tenant(tenant: TenantConfig, *, client: httpx.AsyncClient | None 
                     f"could not sync mcp_servers: {mcp_response.status_code} "
                     f"{mcp_response.text[:300]}"
                 )
+
+        await _delete_absent_services(tenant, active)
+        await _delete_absent_mcp_servers(tenant, active)
     finally:
         if owns_client:
             await active.aclose()
+
+
+async def _delete_absent_services(tenant: TenantConfig, client: httpx.AsyncClient) -> None:
+    """Phase 8: `sync_tenant` only ever upserted, so removing a service from
+    a tenant's config used to leave an orphan `public.services` row forever
+    — `check_availability` would keep offering a service the tenant no
+    longer declares. `not.in.(...)` needs at least one value; an empty
+    services list means "delete every row for this tenant" instead."""
+    slugs = [service.slug for service in tenant.services]
+    params = (
+        {"tenant_id": f"eq.{tenant.tenant_id}", "slug": f"not.in.({','.join(slugs)})"}
+        if slugs
+        else {"tenant_id": f"eq.{tenant.tenant_id}"}
+    )
+    response = await client.delete("/services", params=params)
+    if response.status_code >= 400:
+        raise TenantSyncError(
+            f"could not delete orphaned services: {response.status_code} {response.text[:300]}"
+        )
+
+
+async def _delete_absent_mcp_servers(tenant: TenantConfig, client: httpx.AsyncClient) -> None:
+    """Mirrors `_delete_absent_services` — an MCP server removed from a
+    tenant's config used to keep loading forever under `MCP_SOURCE=supabase`."""
+    names = [server.name for server in tenant.mcp_servers]
+    params = (
+        {"tenant_id": f"eq.{tenant.tenant_id}", "name": f"not.in.({','.join(names)})"}
+        if names
+        else {"tenant_id": f"eq.{tenant.tenant_id}"}
+    )
+    response = await client.delete("/mcp_servers", params=params)
+    if response.status_code >= 400:
+        raise TenantSyncError(
+            f"could not delete orphaned mcp_servers: {response.status_code} {response.text[:300]}"
+        )

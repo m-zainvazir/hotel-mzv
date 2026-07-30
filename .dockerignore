@@ -24,11 +24,13 @@ graphify-out/
 
 node_modules/
 widget/node_modules/
+admin/node_modules/
 # widget/dist/widget.js + .buildhash ARE needed — explicit COPY in the
 # Dockerfile handles that; this ignore is about the build *context*, not
 # what actually lands in the image, so widget/dist stays excluded here too
 # on the same "don't ship what wasn't asked for" logic as widget's own
-# .gitignore rule.
+# .gitignore rule. admin/dist is the same story (Phase 8) — a separate
+# explicit COPY admin/dist in the Dockerfile, node_modules never in context.
 
 .env
 .env.*

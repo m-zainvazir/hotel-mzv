@@ -30,17 +30,18 @@ A multi-tenant AI receptionist: one LangGraph "brain" that serves both **phone**
 See §18 of the plan: `app/brain` (graph, nodes, prompts), `app/channels` (vapi_llm, chat + widget_auth, webhooks), `app/tools` (native + `booking/` provider interface), `app/mcp`, `app/tenancy`, `app/db`, `app/main.py`, `widget/` (Preact/TS chat widget, bundled with Vite), `scripts/` (onboarding), `infra/`, `tests/` (incl. tenant-isolation + latency tests).
 
 ## Build phases
-Follow §15 of the plan in order: 0 Prereqs → 1 Brain skeleton → 2 Vapi voice → 3 Real tools → 4 Multi-tenancy → 5 Chatbot → 6 MCP → 7 Deploy → 8 Avatar. Each phase has an acceptance criterion — meet it before moving on.
+Follow §15 of the plan in order: 0 Prereqs → 1 Brain skeleton → 2 Vapi voice → 3 Real tools → 4 Multi-tenancy → 5 Chatbot → 6 MCP → 7 Deploy → 8 Admin/analytics. Each phase has an acceptance criterion — meet it before moving on. **Phase 8's scope changed from §15's original "avatar + analytics + admin"**: the video avatar moved to `plans/phase10.md` item 13 by client decision, and turned out to be well-timed — Vapi discontinued its Tavus integration (20 Jun 2025), so §12's premise for it ("Tavus, already integrated with Vapi") is stale regardless. Phase 8 shipped analytics + per-tenant admin only.
 
 ## Latency budget
 Target 600–800ms end-of-speech → first audio (§13). Protect it with streaming + acknowledge-then-act, native tools on the critical path, and region co-location.
 
 ## Pending decisions (confirm with the user before they block you)
-Per §16: whose voice to clone (+ consent), avatar now vs later. Booking provider is
+Per §16: whose voice to clone (+ consent). Booking provider is
 decided — Cal.com (not the plan's original Google Calendar recommendation) — see
 Current state. Chat is decided too: web widget only for now (Phase 5) — WhatsApp is
 explicitly deferred, not undecided (`plans/phase10.md` item 4), pending a Twilio
-WhatsApp sender and the same client go-ahead SMS itself is waiting on.
+WhatsApp sender and the same client go-ahead SMS itself is waiting on. Avatar is
+decided too — wanted, but later (`plans/phase10.md` item 13), not Phase 8.
 
 ## Environment gotcha (this Windows dev box)
 - **`uuid_utils` must be 0.12–0.15 here.** Windows Application Control blocks the compiled
@@ -349,6 +350,138 @@ secret 401s, the real one doesn't); and a real `/chat/completions` turn against 
 assistant id returns a correct, contextual answer from the real Gemini model. No phone
 number is attached yet (Vapi web-call only) and Twilio stays parked — both remain the
 client's call, not blocked on anything technical.
+
+**Phase 8 (analytics dashboard + per-tenant admin) is code-complete — see
+`plans/phase8.md`.** Not yet live-verified against the real Supabase project
+(migrations `0008_analytics.sql` / `0009_admin.sql` are not yet applied there;
+that and a real Railway deploy with `ADMIN_ENABLED=true` are `plans/phase8.md`'s
+Step 10). Scope narrowed from plan §15's original "avatar + analytics + admin"
+by client decision — the video avatar moved to `plans/phase10.md` item 13, and a
+Supabase-Auth per-tenant login mini-plan went in beside it as item 14.
+
+- **The tenant read path can now genuinely be `TENANT_SOURCE=supabase`.**
+  New `app/tenancy/supabase_repository.py::SupabaseTenantRepository` loads
+  every tenant into an immutable snapshot **once at boot** (in `lifespan`,
+  before `get_graph()`) plus a background refresh
+  (`TENANT_SNAPSHOT_REFRESH_SECONDS`, default 300s) — never per-request I/O,
+  since `TenantRepository.get()` is synchronous and every caller (graph
+  nodes, every native tool, `resolve_tenant_id`) can't `await`. This is not
+  new machinery so much as `JsonFileTenantRepository`'s exact caching
+  pattern pointed at a different source. `content/tenants/*.json` is now
+  **seed + degraded-mode fallback only** once this is on — never runtime
+  truth in production. Still `"json"` by default (dev/test unaffected, zero
+  test churn).
+- **The reason this had to happen at all: the phantom edit.** An admin
+  panel that edits config while `TENANT_SOURCE` stays `"json"` writes to
+  Postgres via `sync_tenant()` and returns 200 — but the running app keeps
+  reading the JSON files, so the receptionist never sees the change. Both
+  halves work perfectly in isolation; nothing errors, nothing logs.
+  `app/preflight.py` now refuses `ADMIN_ENABLED=true` with `TENANT_SOURCE=json`
+  in production specifically to catch this.
+- **The sync stomp — the mirror-image trap.** `scripts/sync_tenants.py`
+  used to blindly upsert the whole JSON file over Supabase; once the admin
+  panel can write there too, that silently reverts every panel edit. It now
+  refuses to run against `TENANT_SOURCE=supabase` without `--force`, and
+  gained `--export` to pull live config back down into the JSON files
+  instead. `sync_tenant()` (`app/tenancy/sync.py`) also now **deletes**
+  services/MCP servers the config no longer declares — it used to only ever
+  upsert, so removing a service in the panel left an orphan row
+  `check_availability` would keep offering forever.
+- **Analytics reads never use the Supabase secret key.** `0008_analytics.sql`'s
+  five views + one RPC (`tenant_metrics`) are all `security_invoker = true`
+  and read through the *same* tenant-scoped JWT `SupabaseStore` already
+  mints — deliberately, so a future logged-in tenant reading its own metrics
+  runs the identical code path an operator's does. A `public` view without
+  `security_invoker` runs with the *owner's* privileges and does **not**
+  apply the underlying tables' RLS — `tests/test_migrations.py`'s lint is
+  extended to fail any view missing it, since the original table-only lint
+  wouldn't have caught this.
+- **Admin auth fails *closed* — the one deliberate break with this file's
+  own fail-open-when-unconfigured convention** (`app/channels/admin_auth.py`).
+  Every other guard here (`require_chat_caller`, `require_vapi_secret`,
+  `is_ops_caller`) treats an unset secret as "stay open, it's a dev box";
+  `require_admin` 401s on every request when `ADMIN_AUTH_TOKEN` is unset,
+  because the blast radius (every tenant's config, every transcript) is too
+  large to default open. `ADMIN_ENABLED=false` (default) means the router
+  isn't conditionally mounted at all — a router has no clean "un-include"
+  against the one `app.main.app` object every test shares — instead
+  `require_admin_enabled` 404s first, functionally identical to unmounted.
+- **`AdminPrincipal` (`kind`, `tenant_ids`, `may_access`/`may_write`) is the
+  whole "operator-only now, tenant login later" bet.** Every route depends
+  on `require_admin`/`require_tenant_access`, never the raw token; the
+  tenant id comes from the URL path, never the body; `_OPERATOR_ONLY_PATHS`
+  (`app/tenancy/admin.py` — `tenant_id`, `status`, `phone_numbers`,
+  `widget_keys`, `vapi`, `booking.event_type_id`, `voice.voice_id`,
+  `mcp_servers`) ships now, inert, since every principal today is an
+  operator. `plans/phase10.md` item 14 is the mini-plan for the real branch.
+- **Whole-document `PUT`, shallow top-level merge — Pydantic is the entire
+  validation layer.** `app/channels/admin.py::put_tenant` does `{**current,
+  **payload}` at the top level only: submitting `{"greeting": "..."}`
+  changes just that scalar, but submitting `{"voice": {"speed": 1.2}}`
+  replaces the *whole* `voice` section, resetting any sibling field in it to
+  `VoiceSettings`'s defaults. Deliberate, and matches how the admin UI
+  actually submits sections (whole, never a sparse delta). No hand-written
+  validation rule anywhere — `TenantConfig.model_validate`'s existing
+  validators (`_calcom_tenants_declare_event_types`, `_unique_service_slugs`,
+  `DayHours._close_after_open`, every `Field(gt=..., le=...)`, ...) are it;
+  the route's only job is mapping `ValidationError.errors()` to a 422 whose
+  `loc` tuples a UI attaches to inputs.
+- **A real, pre-existing bug this phase's admin write path exposed:**
+  `TenantConfig._real_timezone`'s validator called bare `ZoneInfo(value)`,
+  and `zoneinfo.ZoneInfoNotFoundError` subclasses `KeyError`, which Pydantic
+  does **not** catch and wrap into a `ValidationError` the way it does
+  `ValueError`/`TypeError`/`AssertionError`. A bad timezone through any live
+  API would have 500'd instead of 422ing — invisible until the admin write
+  path became the first thing that actually exposed a bad-timezone input to
+  a live caller. Fixed by catching and re-raising as `ValueError`.
+- **The voice-consent trigger had an upsert blind spot — found before it
+  ever shipped live, fixed in `0009_admin.sql`.** `0005_voice_consent.sql`'s
+  trigger commented that it "only fires when voice_id is newly set or
+  changed" — true for a plain `UPDATE`, false under
+  `Prefer: resolution=merge-duplicates` (`INSERT ... ON CONFLICT DO UPDATE`),
+  whose BEFORE INSERT pass sees `old = null` regardless of whether the
+  voice_id actually changed. Any admin write to an unrelated field on a
+  tenant with an existing cloned voice would have been rejected for "no
+  voice_consents row" — invisible only because no tenant has ever been
+  cloned. Fixed by comparing against a live self-select of the *currently
+  stored* value instead of trusting `old`. `app/tenancy/admin.py::save_tenant`
+  also pre-checks consent before writing (a clean 409 naming the exact
+  `onboard_tenant` command) and maps a `P0001` trigger error the same way,
+  covering the race between the two.
+- **The credential-check-before-client-override bug, twice.**
+  `SupabaseTenantRepository.refresh()` and `app/tenancy/admin.py::get_tenant_version`
+  both originally checked `settings.supabase_url`/`supabase_secret_key`
+  *before* checking whether a `client=` override was passed in — meaning an
+  injected test client was unusable even though credentials were
+  deliberately irrelevant to it. Both now check `owns_client and (not
+  settings...)`, matching the pattern every other injectable provider in
+  this codebase (`CalcomBookingProvider`, `TwilioNotifier`, `SupabaseStore`)
+  already used.
+- **`admin/` mirrors `widget/`'s conventions, but isn't an embed contract.**
+  Preact + TypeScript, a committed `dist/` guarded by a `.buildhash`
+  (`tests/test_admin_bundle.py` — a second artifact with the same "skip
+  means not proof" caveat as the widget's own guard), no chart library, no
+  routing library. Unlike `widget/`, it's a plain Vite SPA build (hashed
+  asset filenames, not library mode) since nothing pastes a `<script>` tag
+  pointing at it — served same-origin from `app/main.py`'s own
+  `StaticFiles` mount, which must be the mount **and** the SPA catch-all
+  route registered **after** `admin.router`, since `/admin/{path:path}`
+  structurally matches `/admin/api/session` too (`{path:path}` captures
+  slashes) and Starlette matches in registration order, not by specificity.
+  `tests/test_api.py`'s route-ordering test is the actual proof, not an
+  assumption. `StaticFiles(directory=...)` also raises **at mount time**
+  (i.e. at boot) if the directory doesn't exist, unlike `/widget.js`'s
+  deliberate 404-with-a-pointer — guarded with `if
+  ADMIN_ASSETS_DIR.is_dir()`.
+- **A genuine Windows-box-only build gotcha, same class as `uuid_utils`:**
+  a fresh `npm install` in `admin/` resolves the newest `4.x` rollup, whose
+  native `@rollup/rollup-win32-x64-msvc` binary is a file this Application
+  Control policy hasn't trusted yet (`ERR_DLOPEN_FAILED` /
+  *"An Application Control policy has blocked this file"*). `widget/`'s
+  committed lockfile happens to pin the older, already-trusted
+  `rollup@4.62.2` — `admin/package.json` pins `vite` to the same `5.4.21`
+  and adds `"overrides": {"rollup": "4.62.2"}` for the same reason. See
+  `admin/README.md`.
 
 ## Gotchas learned the hard way
 - **Groq leaks tool calls into text.** Llama 3.3 sometimes writes

@@ -64,10 +64,17 @@ def test_runs_as_a_non_root_user():
     assert "USER root" not in DOCKERFILE
 
 
+def test_copies_the_admin_dashboard_bundle():
+    """Phase 8 — same reasoning as the widget/dist COPY: built on the host,
+    committed, no Node in this image."""
+    assert "COPY admin/dist ./admin/dist" in DOCKERFILE
+
+
 def test_dockerignore_excludes_the_dev_venv_and_node_modules():
     assert ".venv/" in DOCKERIGNORE
     assert "node_modules/" in DOCKERIGNORE
     assert ".git/" in DOCKERIGNORE
+    assert "admin/node_modules/" in DOCKERIGNORE
 
 
 def test_dockerignore_excludes_secrets():

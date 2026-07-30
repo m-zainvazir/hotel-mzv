@@ -72,9 +72,12 @@ class TestSyncTenant:
         client, requests = mock_http(handler)
         await sync_tenant(hotel, client=client)
 
-        service_reqs = [r for r in requests if r.url.path == "/services"]
-        assert len(service_reqs) == 1
-        req = service_reqs[0]
+        # Phase 8: sync_tenant now also deletes orphaned services (any slug
+        # the tenant no longer declares), so "/services" sees two requests —
+        # the upsert (POST) and the delete-of-absent (DELETE).
+        service_posts = [r for r in requests if r.url.path == "/services" and r.method == "POST"]
+        assert len(service_posts) == 1
+        req = service_posts[0]
         assert dict(req.url.params)["on_conflict"] == "tenant_id,slug"
 
         body = json.loads(req.content)
@@ -82,7 +85,42 @@ class TestSyncTenant:
         assert all(row["tenant_id"] == hotel.tenant_id for row in body)
         assert {row["slug"] for row in body} == {s.slug for s in hotel.services}
 
-    async def test_tenant_with_no_services_skips_the_services_call(self):
+    async def test_deletes_services_and_mcp_servers_absent_from_the_current_config(self, hotel):
+        """The bug this closes: sync_tenant used to only ever upsert, so
+        removing a service or MCP server from a tenant's config left an
+        orphan row forever — check_availability would keep offering a
+        service the tenant no longer declares, and MCP_SOURCE=supabase would
+        keep loading a server that was supposedly removed."""
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            if req.url.path == "/tenants":
+                return httpx.Response(201, json=[{"tenant_id": hotel.tenant_id}])
+            return httpx.Response(200, json=[])
+
+        client, requests = mock_http(handler)
+        await sync_tenant(hotel, client=client)
+
+        services_delete = next(
+            r for r in requests if r.url.path == "/services" and r.method == "DELETE"
+        )
+        params = dict(services_delete.url.params)
+        assert params["tenant_id"] == f"eq.{hotel.tenant_id}"
+        current_slugs = {s.slug for s in hotel.services}
+        assert current_slugs <= set(params["slug"].removeprefix("not.in.(").removesuffix(")").split(","))
+
+        mcp_delete = next(r for r in requests if r.url.path == "/mcp_servers" and r.method == "DELETE")
+        mcp_params = dict(mcp_delete.url.params)
+        assert mcp_params["tenant_id"] == f"eq.{hotel.tenant_id}"
+        current_names = {s.name for s in hotel.mcp_servers}
+        assert current_names <= set(
+            mcp_params["name"].removeprefix("not.in.(").removesuffix(")").split(",")
+        )
+
+    async def test_deletes_every_row_when_the_tenant_has_none_left(self):
+        """An empty services/mcp_servers list means "delete every row for
+        this tenant", not "skip the delete" — `not.in.()` is invalid
+        PostgREST syntax for an empty list, so this must take the
+        no-filter branch instead."""
         from app.tenancy.models import EmergencyPolicy, TenantConfig
 
         bare_tenant = TenantConfig(
@@ -99,8 +137,38 @@ class TestSyncTenant:
         client, requests = mock_http(handler)
         await sync_tenant(bare_tenant, client=client)
 
-        assert len(requests) == 1
-        assert requests[0].url.path == "/tenants"
+        services_delete = next(r for r in requests if r.url.path == "/services")
+        assert services_delete.method == "DELETE"
+        assert "slug" not in dict(services_delete.url.params)
+
+        mcp_delete = next(r for r in requests if r.url.path == "/mcp_servers")
+        assert mcp_delete.method == "DELETE"
+        assert "name" not in dict(mcp_delete.url.params)
+
+    async def test_tenant_with_no_services_skips_the_services_upsert_post(self):
+        """Renamed from "skips the services call" (Phase 8): sync_tenant now
+        always issues a DELETE for absent children, even with zero services
+        — see test_deletes_every_row_when_the_tenant_has_none_left above.
+        What genuinely still gets skipped is the upsert POST, since there's
+        nothing to upsert."""
+        from app.tenancy.models import EmergencyPolicy, TenantConfig
+
+        bare_tenant = TenantConfig(
+            tenant_id="bare-test-tenant",
+            name="Bare",
+            trade="test",
+            greeting="hi",
+            emergency=EmergencyPolicy(escalation_phone="+15550000000"),
+        )
+
+        def handler(_req: httpx.Request) -> httpx.Response:
+            return httpx.Response(201, json=[{"tenant_id": "bare-test-tenant"}])
+
+        client, requests = mock_http(handler)
+        await sync_tenant(bare_tenant, client=client)
+
+        assert not [r for r in requests if r.url.path == "/services" and r.method == "POST"]
+        assert not [r for r in requests if r.url.path == "/mcp_servers" and r.method == "POST"]
 
     async def test_missing_admin_config_raises_without_http_call(self, hotel, monkeypatch):
         monkeypatch.delenv("SUPABASE_URL", raising=False)

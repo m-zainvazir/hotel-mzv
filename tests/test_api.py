@@ -278,3 +278,71 @@ def test_cors_preflight_allows_a_cross_origin_chat_call(client):
     )
     assert response.status_code == 200
     assert response.headers["access-control-allow-origin"] == "*"
+
+
+# --- serving the admin UI (Phase 8) -----------------------------------------
+
+
+def test_health_reports_admin_missing_when_enabled_but_not_built(client, monkeypatch, tmp_path):
+    import app.main as main_module
+
+    monkeypatch.setenv("ADMIN_ENABLED", "true")
+    monkeypatch.setenv("ADMIN_AUTH_TOKEN", "a" * 40)
+    reset_settings_cache()
+    monkeypatch.setattr(main_module, "ADMIN_INDEX_PATH", tmp_path / "does-not-exist.html")
+    try:
+        body = client.get("/health").json()
+        assert body["admin"] == "missing"
+        assert body["status"] == "degraded"
+        assert "admin bundle not built" in body["problems"]
+    finally:
+        reset_settings_cache()
+
+
+def test_health_admin_not_reported_as_a_problem_when_admin_is_disabled(client, monkeypatch, tmp_path):
+    """A box that never opted into ADMIN_ENABLED shouldn't get a spurious
+    "problem" for a bundle it was never asked to build."""
+    import app.main as main_module
+
+    monkeypatch.setattr(main_module, "ADMIN_INDEX_PATH", tmp_path / "does-not-exist.html")
+    body = client.get("/health").json()
+    assert body["admin"] == "missing"
+    assert body["status"] == "ok"
+    assert body["problems"] == []
+
+
+def test_route_ordering_admin_api_is_never_shadowed_by_the_spa_catch_all(client, monkeypatch):
+    """The risk this exists to close: a catch-all registered before the API
+    router would return this page's HTML to a JSON client. /admin/api/tenants
+    structurally matches the wildcard route too (`{path:path}` captures
+    slashes) — this proves registration order wins, not just that the route
+    "happens to" return JSON today."""
+    monkeypatch.setenv("ADMIN_ENABLED", "true")
+    monkeypatch.setenv("ADMIN_AUTH_TOKEN", "a" * 40)
+    reset_settings_cache()
+    try:
+        response = client.get(
+            "/admin/api/tenants", headers={"Authorization": f"Bearer {'a' * 40}"}
+        )
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("application/json")
+    finally:
+        reset_settings_cache()
+
+
+def test_admin_spa_catch_all_serves_the_built_index_for_any_deep_link(client):
+    """The router lives client-side in the URL hash, so the server renders
+    the identical index.html for every path — a deep link like
+    /admin/tenants/hotel-mzv (or anything else) must not 404."""
+    response = client.get("/admin/tenants/hotel-mzv/config")
+    assert response.status_code == 200
+    assert "text/html" in response.headers["content-type"]
+
+
+def test_admin_spa_catch_all_404s_with_a_pointer_when_unbuilt(client, monkeypatch, tmp_path):
+    import app.main as main_module
+
+    monkeypatch.setattr(main_module, "ADMIN_INDEX_PATH", tmp_path / "does-not-exist.html")
+    response = client.get("/admin/anything")
+    assert response.status_code == 404
+    assert "npm --prefix admin run build" in response.json()["detail"]

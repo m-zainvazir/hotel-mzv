@@ -74,3 +74,48 @@ def test_active_llm_provider_needs_its_own_api_key():
 def test_every_problem_is_named_at_once_not_just_the_first():
     problems = verify_production_settings(Settings(app_env="production"))
     assert len(problems) >= 5
+
+
+def test_tenant_source_supabase_without_supabase_url_fails():
+    config = dict(_COMPLETE, tenant_source="supabase")
+    problems = verify_production_settings(Settings(**config))
+    assert len(problems) == 1
+    assert "TENANT_SOURCE" in problems[0]
+
+
+def test_admin_enabled_without_admin_auth_token_fails():
+    config = dict(_COMPLETE, admin_enabled=True)
+    problems = verify_production_settings(Settings(**config))
+    assert any("ADMIN_AUTH_TOKEN" in p for p in problems)
+
+
+def test_admin_auth_token_shorter_than_32_chars_fails():
+    config = dict(_COMPLETE, admin_enabled=True, admin_auth_token="short-token")
+    problems = verify_production_settings(Settings(**config))
+    assert any("32 characters" in p for p in problems)
+
+
+def test_admin_enabled_with_json_tenant_source_fails_the_phantom_edit_guard():
+    """The check that stops the worst Phase 8 outcome from ever shipping: an
+    admin write reaching Supabase while the running app keeps reading
+    content/tenants/*.json, silently reverting every edit on the next boot."""
+    config = dict(
+        _COMPLETE,
+        admin_enabled=True,
+        admin_auth_token="a" * 40,
+        tenant_source="json",
+    )
+    problems = verify_production_settings(Settings(**config))
+    assert any("TENANT_SOURCE=json" in p for p in problems)
+
+
+def test_admin_enabled_with_supabase_tenant_source_and_a_real_token_is_clean():
+    config = dict(
+        _COMPLETE,
+        admin_enabled=True,
+        admin_auth_token="a" * 40,
+        tenant_source="supabase",
+        supabase_url="https://project.supabase.co",
+        supabase_jwt_secret="jwtsecret",
+    )
+    assert verify_production_settings(Settings(**config)) == []

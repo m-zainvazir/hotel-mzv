@@ -28,6 +28,14 @@ widget/dist/*
 !widget/dist/widget.js
 !widget/dist/.buildhash
 
+# --- admin dashboard (Phase 8) ----------------------------------------------
+# Unlike widget/dist's single fixed filename, admin/dist's asset filenames
+# are content-hashed per build (index-<hash>.js, index-<hash>.css) — there's
+# no fixed name to allowlist the way widget/dist does, so the whole directory
+# is committed instead (node_modules/ above already covers
+# admin/node_modules at any depth). tests/test_admin_bundle.py is the guard
+# against it drifting from admin/src, same as widget's own.
+
 # --- tooling -------------------------------------------------------------
 .pytest_cache/
 .ruff_cache/

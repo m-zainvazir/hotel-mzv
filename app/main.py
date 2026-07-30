@@ -7,6 +7,7 @@ the only thing you deploy.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import sys
 from contextlib import asynccontextmanager
@@ -14,6 +15,7 @@ from contextlib import asynccontextmanager
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 if sys.platform == "win32":
     # psycopg's async mode (Phase 4 Step 7's Postgres checkpointer) needs
@@ -66,7 +68,7 @@ if sys.platform == "win32":
 
 from app import __version__
 from app.brain.graph import active_checkpointer_name, get_graph, init_postgres_checkpointer
-from app.channels import chat, vapi_llm, webhooks
+from app.channels import admin, chat, vapi_llm, webhooks
 from app.channels.security import is_ops_caller
 from app.config import REPO_ROOT, get_settings
 from app.db.checkpointer import close_postgres_pool
@@ -75,7 +77,8 @@ from app.db.supabase_store import SupabaseStoreError
 from app.logging_config import configure_logging
 from app.middleware import RequestContextMiddleware
 from app.preflight import verify_production_settings
-from app.tenancy.loader import get_repository
+from app.tenancy.loader import get_repository, set_repository
+from app.tenancy.supabase_repository import SupabaseTenantRepository
 from app.tools.http_client import close_shared_clients
 
 # At import time, not inside `lifespan`: uvicorn's own `Config.configure_logging()`
@@ -91,6 +94,10 @@ WIDGET_DIST_DIR = REPO_ROOT / "widget" / "dist"
 WIDGET_BUNDLE_PATH = WIDGET_DIST_DIR / "widget.js"
 WIDGET_BUILDHASH_PATH = WIDGET_DIST_DIR / ".buildhash"
 WIDGET_DEMO_PATH = REPO_ROOT / "widget" / "demo.html"
+
+ADMIN_DIST_DIR = REPO_ROOT / "admin" / "dist"
+ADMIN_ASSETS_DIR = ADMIN_DIST_DIR / "assets"
+ADMIN_INDEX_PATH = ADMIN_DIST_DIR / "index.html"
 
 
 @asynccontextmanager
@@ -117,6 +124,24 @@ async def lifespan(app: FastAPI):
         os.environ["LANGCHAIN_TRACING_V2"] = "true"
         os.environ["LANGCHAIN_API_KEY"] = settings.langchain_api_key
         os.environ["LANGCHAIN_PROJECT"] = settings.langchain_project
+    # Phase 8: swap the tenant repository onto Supabase *before* anything
+    # else reads a tenant. content/tenants/*.json (the fallback here) is
+    # still baked into the image, but is now seed + degraded-mode fallback,
+    # never runtime truth in production — see plans/phase8.md "Why the
+    # read-path flip is the whole phase". `refresh()` never raises, so this
+    # can never fail the boot; a wholesale failure just serves the fallback
+    # and shows up in /health's problems[].
+    tenant_refresh_task: asyncio.Task | None = None
+    if settings.tenant_source == "supabase":
+        supabase_repo = SupabaseTenantRepository(fallback=get_repository())
+        await supabase_repo.refresh()
+        set_repository(supabase_repo)
+        if settings.tenant_snapshot_refresh_seconds > 0:
+            tenant_refresh_task = asyncio.create_task(
+                _tenant_snapshot_refresh_loop(
+                    supabase_repo, settings.tenant_snapshot_refresh_seconds
+                )
+            )
     # Compile the graph at boot so the first caller doesn't pay for it. This
     # always succeeds (in-memory, zero I/O) before anything Supabase-shaped
     # is attempted.
@@ -129,9 +154,23 @@ async def lifespan(app: FastAPI):
     # is configured. Never fails the boot — see its docstring.
     await init_postgres_checkpointer()
     yield
+    if tenant_refresh_task is not None:
+        tenant_refresh_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await tenant_refresh_task
     # Close pooled connections to Cal.com/Twilio/etc cleanly (app/tools/http_client.py).
     await close_shared_clients()
     await close_postgres_pool()
+
+
+async def _tenant_snapshot_refresh_loop(repo: SupabaseTenantRepository, interval: float) -> None:
+    """Background self-heal: retries after a wholesale load failure, and
+    picks up an out-of-band edit (direct SQL, `scripts/sync_tenants.py`) that
+    didn't go through the admin write path's explicit `refresh()` call.
+    `refresh()` never raises, so there's nothing here to guard against."""
+    while True:
+        await asyncio.sleep(interval)
+        await repo.refresh()
 
 
 app = FastAPI(
@@ -163,6 +202,13 @@ app.add_middleware(RequestContextMiddleware)
 app.include_router(chat.router)
 app.include_router(vapi_llm.router)
 app.include_router(webhooks.router)
+# Always mounted, unlike a naive "only include_router when ADMIN_ENABLED" —
+# a router has no clean "un-include" once added, which matters because every
+# test in the suite shares this one `app` object. ADMIN_ENABLED=false is
+# instead enforced per-request by require_admin_enabled
+# (app/channels/admin_auth.py), the first dependency on every admin route —
+# functionally a 404 indistinguishable from an unmounted route.
+app.include_router(admin.router)
 
 
 @app.get("/widget.js", include_in_schema=False)
@@ -196,6 +242,7 @@ async def health(authenticated: bool = Depends(is_ops_caller)) -> dict:
     settings = get_settings()
     checkpointer = active_checkpointer_name()
     widget_built = WIDGET_BUNDLE_PATH.is_file()
+    admin_built = ADMIN_INDEX_PATH.is_file()
     mcp_status = _mcp_health(settings)
 
     problems: list[str] = []
@@ -209,8 +256,23 @@ async def health(authenticated: bool = Depends(is_ops_caller)) -> dict:
         # `COPY widget/dist ...`) is one curl away from visible instead of a
         # 404 the first time a client's site tries to load the widget.
         problems.append("widget bundle not built")
+    if settings.admin_enabled and not admin_built:
+        # Same reasoning as widget above — only surfaced when ADMIN_ENABLED
+        # is actually true, so a box that hasn't opted into the admin
+        # surface at all doesn't get a spurious "problem" for a bundle it
+        # was never asked to build.
+        problems.append("admin bundle not built")
     if mcp_status == "unavailable":
         problems.append("mcp is enabled but langchain-mcp-adapters is not installed")
+    repository = get_repository()
+    if settings.tenant_source == "supabase" and getattr(repository, "degraded", False):
+        # The phantom-edit mirror image: an edit landed in Supabase, the
+        # snapshot fell back to JSON, and the change looks reverted. Loud is
+        # the whole point — see plans/phase8.md's "the phantom edit".
+        problems.append(
+            "tenant config is degraded — one or more tenants are serving the JSON "
+            "fallback because the Supabase snapshot failed to load or validate"
+        )
 
     body: dict = {
         "status": "degraded" if problems else "ok",
@@ -218,6 +280,7 @@ async def health(authenticated: bool = Depends(is_ops_caller)) -> dict:
         "store": "supabase" if settings.supabase_url else "memory",
         "checkpointer": checkpointer,
         "widget": "built" if widget_built else "missing",
+        "admin": "built" if admin_built else "missing",
         "mcp": mcp_status,
         "problems": problems,
     }
@@ -230,7 +293,8 @@ async def health(authenticated: bool = Depends(is_ops_caller)) -> dict:
         body["env"] = settings.app_env
         body["llm_provider"] = settings.llm_provider
         body["model"] = settings.active_model
-        body["tenants"] = get_repository().list_ids()
+        body["tenants"] = repository.list_ids()
+        body["tenant_source"] = settings.tenant_source
         body["tracing"] = bool(settings.langchain_tracing_v2 and settings.langchain_api_key)
     return body
 
@@ -267,3 +331,42 @@ def _mcp_health(settings) -> str:
     except ImportError:
         return "unavailable"
     return settings.mcp_source
+
+
+# --- serving the admin UI (Phase 8) -----------------------------------------
+#
+# Both of these MUST be the last routes registered in this file. Starlette
+# matches routes in *registration* order and picks the first match, not the
+# most specific one — `GET /admin/{path:path}` below structurally matches
+# `/admin/api/session` too (`{path:path}` captures slashes), so if it were
+# registered before `app.include_router(admin.router)` above, every admin API
+# call would silently get back this page's HTML instead of JSON. Route
+# shadowing here is exactly the kind of thing with no test unless one is
+# written — see tests/test_api.py's ordering assertion.
+#
+# `StaticFiles(directory=...)` raises at *mount* time (i.e. at import, i.e.
+# at boot) if the directory doesn't exist — turning "forgot to run `npm
+# --prefix admin run build`" into a crashed boot, the opposite of
+# /widget.js's deliberate 404-with-a-pointer above. Guard it explicitly
+# instead; `/health`'s `admin` field is what makes the missing bundle
+# visible when ADMIN_ENABLED=true and nobody built it.
+if ADMIN_ASSETS_DIR.is_dir():
+    app.mount("/admin/assets", StaticFiles(directory=ADMIN_ASSETS_DIR), name="admin-assets")
+
+
+@app.get("/admin/{path:path}", include_in_schema=False)
+async def admin_spa(path: str) -> FileResponse:
+    """The SPA catch-all: every deep link (`/admin/#/tenants/hotel-mzv/config`
+    — the router lives client-side in the hash, so the server never even
+    sees it) renders the identical `index.html`. Not gated on
+    `ADMIN_ENABLED` — that's `require_admin_enabled`'s job for the *API*;
+    serving the shell itself is harmless, and the login screen it renders is
+    useless without a working token regardless."""
+    del path
+    if not ADMIN_INDEX_PATH.is_file():
+        raise HTTPException(
+            status_code=404,
+            detail="admin bundle not built — run `npm --prefix admin install && "
+            "npm --prefix admin run build` (see admin/README.md)",
+        )
+    return FileResponse(ADMIN_INDEX_PATH, media_type="text/html")
