@@ -130,7 +130,9 @@ export type TenantConfig = Record<string, unknown> & {
   status: string;
   greeting: string;
   persona: string;
+  system_prompt_override?: string | null;
   _health?: ConfigHealth;
+  _rendered_system_prompt?: string;
   _version?: string | null;
 };
 

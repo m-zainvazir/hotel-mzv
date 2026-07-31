@@ -30,6 +30,7 @@ from typing import Any
 from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query, status
 from pydantic import ValidationError
 
+from app.brain.prompts.system import render_system_prompt
 from app.channels.admin_auth import (
     AdminPrincipal,
     require_admin,
@@ -139,6 +140,11 @@ async def get_tenant(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     body = config.model_dump(mode="json")
     body["_health"] = _config_health(config)
+    # The fully-resolved prompt the brain actually sends to the model right
+    # now — computed here (string formatting only, no store/network I/O) so
+    # the admin panel's "AI Prompt" tab has a real starting point to edit
+    # from, not a blank box, on a tenant with no override set yet.
+    body["_rendered_system_prompt"] = render_system_prompt(config, channel="chat")
     # None under TENANT_SOURCE=json (dev/test default) — there's no
     # `tenants.updated_at` row to version against. PUT reads None as "skip
     # the optimistic-concurrency check", matching that mode's reality: JSON
@@ -207,6 +213,7 @@ async def put_tenant(
 
     body = saved.model_dump(mode="json")
     body["_health"] = _config_health(saved)
+    body["_rendered_system_prompt"] = render_system_prompt(saved, channel="chat")
     body["_version"] = await tenancy_admin.get_tenant_version(tenant_id)
     return body
 

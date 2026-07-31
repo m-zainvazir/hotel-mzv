@@ -75,6 +75,16 @@ def test_get_unknown_tenant_is_404(admin_client):
     assert response.status_code == 404
 
 
+def test_get_tenant_includes_the_rendered_system_prompt(admin_client):
+    """The admin panel's AI Prompt tab needs a real starting point, not a
+    blank box, on a tenant with no override set yet."""
+    response = admin_client.get("/admin/api/tenants/hotel-mzv", headers=_bearer())
+    body = response.json()
+    assert body["system_prompt_override"] is None
+    assert "Hotel_MZV" in body["_rendered_system_prompt"]
+    assert "## Safety" in body["_rendered_system_prompt"]
+
+
 def test_calls_list_response_has_no_transcript_key(admin_client):
     get_store().record_call(
         Call(

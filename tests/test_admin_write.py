@@ -335,6 +335,53 @@ class TestPutTenantRoute:
         assert body["greeting"] == "New greeting text"
         assert body["_version"] == "v2"
 
+    def test_a_system_prompt_override_is_saved_and_reflected_in_the_render(
+        self, admin_client, monkeypatch
+    ):
+        """Not an operator-only field (unlike voice_id/mcp_servers) — behaviour
+        text, same category as greeting/persona."""
+
+        async def _fake_save(config, *, expected_version, client=None):
+            return config
+
+        async def _fake_version(tenant_id, *, client=None):
+            return "v2"
+
+        monkeypatch.setattr(admin_module.tenancy_admin, "save_tenant", _fake_save)
+        monkeypatch.setattr(admin_module.tenancy_admin, "get_tenant_version", _fake_version)
+
+        response = admin_client.put(
+            "/admin/api/tenants/hotel-mzv",
+            json={"system_prompt_override": "You are ${business_name}'s custom receptionist."},
+            headers=_bearer(),
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["system_prompt_override"] == "You are ${business_name}'s custom receptionist."
+        assert "custom receptionist" in body["_rendered_system_prompt"]
+
+    def test_clearing_a_system_prompt_override_falls_back_to_the_shared_default(
+        self, admin_client, monkeypatch
+    ):
+        async def _fake_save(config, *, expected_version, client=None):
+            return config
+
+        async def _fake_version(tenant_id, *, client=None):
+            return "v2"
+
+        monkeypatch.setattr(admin_module.tenancy_admin, "save_tenant", _fake_save)
+        monkeypatch.setattr(admin_module.tenancy_admin, "get_tenant_version", _fake_version)
+
+        response = admin_client.put(
+            "/admin/api/tenants/hotel-mzv",
+            json={"system_prompt_override": None},
+            headers=_bearer(),
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["system_prompt_override"] is None
+        assert "## Safety" in body["_rendered_system_prompt"]
+
     @pytest.mark.parametrize(
         "payload,expected_loc",
         [

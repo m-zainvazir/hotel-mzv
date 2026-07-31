@@ -4,6 +4,12 @@ The prompt *text* lives in `content/system-prompt.md` so it can be edited
 without touching code. This module fills its ${placeholders} with per-tenant
 values rendered fresh each turn — which is what lets one graph serve many
 trades: a plumber tenant just loads different config (plan §9, feature 2).
+
+A tenant may also set `TenantConfig.system_prompt_override` (Phase 8 admin
+panel) to replace the shared file entirely, scoped to that tenant only. The
+override still runs through the same `safe_substitute()` call, so an admin
+who leaves `${business_name}`-style placeholders in their edited text keeps
+those pieces live; removing them just makes that section static.
 """
 
 from __future__ import annotations
@@ -72,9 +78,16 @@ def render_system_prompt(
             "Then call escalate immediately. Do not book, do not ask routine questions."
         )
 
+    template = (
+        Template(tenant.system_prompt_override)
+        if tenant.system_prompt_override
+        else _load_template()
+    )
+
     # safe_substitute never raises on a stray '$' or an unknown ${name}, so a
-    # non-developer editing content/system-prompt.md can't crash a live call.
-    return _load_template().safe_substitute(
+    # non-developer editing content/system-prompt.md (or a tenant's own
+    # override, via the admin panel) can't crash a live call.
+    return template.safe_substitute(
         business_name=tenant.name,
         trade=tenant.trade,
         persona=tenant.persona or "friendly, efficient, professional",

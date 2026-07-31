@@ -248,6 +248,12 @@ class TenantConfig(BaseModel):
 
     greeting: str
     persona: str = ""
+    #: Full replacement for content/system-prompt.md's shared ${placeholder}
+    #: template, scoped to this tenant only (Phase 8 admin panel's "AI
+    #: Prompt" tab). Still run through the same safe_substitute() call
+    #: (app/brain/prompts/system.py), so placeholders left in the override
+    #: text keep resolving live; None or "" falls back to the shared file.
+    system_prompt_override: str | None = None
     hours: dict[str, DayHours | None] = Field(default_factory=dict)
     services: list[Service] = Field(default_factory=list)
     emergency: EmergencyPolicy

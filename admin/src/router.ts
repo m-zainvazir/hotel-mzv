@@ -4,11 +4,11 @@
 // a dependency for it.
 import { useEffect, useState } from "preact/hooks";
 
-export type Tab = "metrics" | "config" | "calls" | "chats" | "jobs" | "escalations";
+export type Tab = "metrics" | "config" | "prompt" | "calls" | "chats" | "jobs" | "escalations";
 
 export type Route = { name: "overview" } | { name: "tenant"; tenantId: string; tab: Tab };
 
-const VALID_TABS: Tab[] = ["metrics", "config", "calls", "chats", "jobs", "escalations"];
+const VALID_TABS: Tab[] = ["metrics", "config", "prompt", "calls", "chats", "jobs", "escalations"];
 
 function parse(hash: string): Route {
   const parts = hash.replace(/^#\/?/, "").split("/").filter(Boolean);

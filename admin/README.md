@@ -64,6 +64,7 @@ src/
     TenantView.tsx         per-tenant tab shell
     Metrics.tsx            tiles + daily charts
     Config.tsx             the tenant config editor — see below
+    SystemPrompt.tsx        the "AI Prompt" tab — see below
     Calls.tsx               calls list + one-at-a-time transcript drill-in
     Chats.tsx               chat sessions list + message drill-in
     JobsEscalations.tsx     bookings + escalations lists
@@ -89,3 +90,19 @@ matching input. A 409 means either a stale version (someone else saved
 first — the config is silently reloaded to the current version) or a missing
 voice consent (surfaced as the server's own actionable message, which names
 the exact `onboard_tenant` command to run).
+
+## The "AI Prompt" tab (`views/SystemPrompt.tsx`)
+
+Edits `TenantConfig.system_prompt_override` — a full, tenant-scoped
+replacement for the shared `content/system-prompt.md` template
+(`app/brain/prompts/system.py::render_system_prompt`). `GET
+/tenants/{id}` returns `_rendered_system_prompt`: the *actually rendered*
+prompt for that tenant right now (server-side string formatting only, no
+extra I/O), so a tenant with no override yet edits real, fully-resolved
+text instead of a blank box or the raw `${placeholder}` file. Saving with
+an empty string is equivalent to saving `null` — both fall back to the
+shared template on the next turn, no restart needed. An override still
+runs through `safe_substitute()`, so leaving tokens like `${business_name}`
+or `${business_hours}` in place keeps that part dynamic; removing them
+just makes that section fixed text. Not operator-only — same category as
+`greeting`/`persona`, not `voice.voice_id`/`mcp_servers`.
