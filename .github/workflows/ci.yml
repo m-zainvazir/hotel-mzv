@@ -15,8 +15,19 @@ jobs:
         with:
           python-version: "3.12"
 
+      # `mcp` (Phase 6) is a separate optional extra from `dev`, kept apart
+      # so a dev box can run the suite without the compiled dependencies
+      # (rpds-py, cryptography, pywin32) that extra pulls in on Windows —
+      # see CLAUDE.md's Phase 6 gotchas. That risk doesn't exist on this
+      # Linux runner, and tests/test_mcp_loader.py (+ one test in
+      # test_tenant_isolation.py) monkeypatch
+      # `langchain_mcp_adapters.client.MultiServerMCPClient` by string path,
+      # which requires the real package to be importable even though it's
+      # then replaced with a fake — omitting the extra here failed those
+      # tests with ModuleNotFoundError on every run since Phase 6, invisible
+      # locally wherever `pip install -e ".[mcp]"` had ever been run once.
       - name: Install
-        run: pip install -e ".[dev]"
+        run: pip install -e ".[dev,mcp]"
 
       # No Node/npm step here on purpose: tests/test_widget_bundle.py
       # already catches dist/-vs-src/ drift in Python (see widget/README.md

@@ -360,6 +360,22 @@ Everything offline on the existing `ScriptedChatModel` + `mock_http` + autouse
 through `load_mcp_tools(..., client=…)`, so the suite passes whether or not the `mcp`
 extra is installed — which also means CI needs no new dependency.
 
+**Amendment (Phase 8 CI investigation, 31 Jul 2026): the last clause was wrong.**
+`tests/test_mcp_loader.py` and one test in `tests/test_tenant_isolation.py` monkeypatch
+`langchain_mcp_adapters.client.MultiServerMCPClient` by **string path**
+(`monkeypatch.setattr("langchain_mcp_adapters.client.MultiServerMCPClient", FakeClient)`),
+not by injecting a fake `client=` into `load_mcp_tools`. A string-path `monkeypatch.setattr`
+must `importlib.import_module` the target module to resolve it before patching an attribute
+on it — so these specific tests **do** require the real package to be importable, even
+though it's immediately replaced with a fake. `.github/workflows/ci.yml` installed only
+`.[dev]`, never `.[mcp]`, so these 10 tests failed with `ModuleNotFoundError` on every CI
+run since this phase merged — invisible locally on any dev box where `pip install -e
+".[mcp]"` had ever been run once (as Step 0's dependency probe recommends), silently
+masking the gap for months. Fixed by adding `mcp` to CI's install line; Linux has none of
+the compiled-dependency risk (`rpds-py`, `cryptography`, `pywin32`) this phase's Risk 1
+weighed against installing it unconditionally — that risk is specifically a Windows
+dev-box concern.
+
 New:
 
 * `tests/test_mcp_registry.py` — JSON vs Supabase dispatch; the Supabase request carries
