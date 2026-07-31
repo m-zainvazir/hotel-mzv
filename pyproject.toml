@@ -61,7 +61,15 @@ postgres = [
 dev = [
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
-    "ruff>=0.8",
+    # Pinned exact, not a floor: CI runs a fresh `pip install` every time, so
+    # an open-ended `>=0.8` silently installs whatever's newest *today* —
+    # the same class of drift CLAUDE.md already documents twice
+    # (uuid_utils, the [google] extra). A ruff release after 0.15.22 added
+    # `ruff format`'s Python-code-fence handling inside Markdown files,
+    # which started reformatting the illustrative snippets in plans/*.md —
+    # invisible locally (an older ruff was already installed) and silently
+    # broke CI's `ruff format --check .` for every commit since, unnoticed.
+    "ruff==0.15.22",
 ]
 # `langgraph dev` — LangGraph Studio against langgraph.json.
 studio = ["langgraph-cli[inmem]>=0.1.55"]
@@ -78,6 +86,13 @@ filterwarnings = ["ignore::DeprecationWarning"]
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+# Markdown files (plans/*.md, CLAUDE.md, ...) hold illustrative Python
+# snippets for readability, not real source — they're not imported, not
+# tested, and have no business being held to ruff's exact formatting
+# opinion. Newer ruff releases format Python code fences inside Markdown by
+# default; excluding these means a future version bump can't silently break
+# CI over a doc snippet again, regardless of the exact-pin above.
+extend-exclude = ["*.md"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
