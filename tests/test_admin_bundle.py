@@ -45,7 +45,8 @@ def _computed_hash() -> str:
 
 @pytest.mark.skipif(
     not BUILDHASH_PATH.is_file(),
-    reason="admin bundle not built — run `npm --prefix admin install && npm --prefix admin run build`",
+    reason="admin bundle not built — run `npm --prefix admin install && "
+    "npm --prefix admin run build`",
 )
 def test_admin_bundle_matches_its_source():
     committed = BUILDHASH_PATH.read_text(encoding="utf-8").strip()

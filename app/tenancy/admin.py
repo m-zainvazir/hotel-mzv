@@ -94,9 +94,7 @@ def operator_only_violations(current: TenantConfig, proposed: TenantConfig) -> l
     ]
 
 
-async def _current_row(
-    tenant_id: str, client: httpx.AsyncClient
-) -> dict[str, Any] | None:
+async def _current_row(tenant_id: str, client: httpx.AsyncClient) -> dict[str, Any] | None:
     response = await client.get(
         "/tenants",
         params={"tenant_id": f"eq.{tenant_id}", "select": "updated_at,config", "limit": "1"},

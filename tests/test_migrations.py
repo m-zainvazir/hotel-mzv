@@ -107,7 +107,10 @@ def test_view_grants_to_app_backend(view):
     # granted to `authenticated` — that would hand a future Supabase-Auth
     # end user every grant written for this backend, exactly what
     # 0002_rls.sql's app_backend-not-authenticated choice exists to prevent.
-    assert not re.search(rf"grant [\w, ]+ on public\.{view} to authenticated", text, re.IGNORECASE), (
+    leaked_to_authenticated = re.search(
+        rf"grant [\w, ]+ on public\.{view} to authenticated", text, re.IGNORECASE
+    )
+    assert not leaked_to_authenticated, (
         f"public.{view} is granted to `authenticated` — that role is for GoTrue end "
         "users and must never inherit this backend's grants"
     )

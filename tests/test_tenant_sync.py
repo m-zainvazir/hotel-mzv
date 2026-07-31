@@ -106,9 +106,12 @@ class TestSyncTenant:
         params = dict(services_delete.url.params)
         assert params["tenant_id"] == f"eq.{hotel.tenant_id}"
         current_slugs = {s.slug for s in hotel.services}
-        assert current_slugs <= set(params["slug"].removeprefix("not.in.(").removesuffix(")").split(","))
+        sent_slugs = params["slug"].removeprefix("not.in.(").removesuffix(")").split(",")
+        assert current_slugs <= set(sent_slugs)
 
-        mcp_delete = next(r for r in requests if r.url.path == "/mcp_servers" and r.method == "DELETE")
+        mcp_delete = next(
+            r for r in requests if r.url.path == "/mcp_servers" and r.method == "DELETE"
+        )
         mcp_params = dict(mcp_delete.url.params)
         assert mcp_params["tenant_id"] == f"eq.{hotel.tenant_id}"
         current_names = {s.name for s in hotel.mcp_servers}

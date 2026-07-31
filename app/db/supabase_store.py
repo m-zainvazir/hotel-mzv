@@ -407,9 +407,7 @@ class SupabaseStore:
             await self._request("GET", "/daily_chat_stats", tenant_id=tenant_id, params=query)
         )
         escalation_rows = _rows(
-            await self._request(
-                "GET", "/daily_escalation_stats", tenant_id=tenant_id, params=query
-            )
+            await self._request("GET", "/daily_escalation_stats", tenant_id=tenant_id, params=query)
         )
 
         buckets: dict[date, DailyMetrics] = {}

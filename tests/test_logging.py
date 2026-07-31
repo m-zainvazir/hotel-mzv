@@ -22,8 +22,13 @@ def client():
 
 def _record(**extra) -> logging.LogRecord:
     record = logging.LogRecord(
-        name="app.test", level=logging.INFO, pathname=__file__, lineno=1,
-        msg="hello %s", args=("world",), exc_info=None,
+        name="app.test",
+        level=logging.INFO,
+        pathname=__file__,
+        lineno=1,
+        msg="hello %s",
+        args=("world",),
+        exc_info=None,
     )
     for key, value in extra.items():
         setattr(record, key, value)

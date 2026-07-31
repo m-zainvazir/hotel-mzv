@@ -12,9 +12,9 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from app.tenancy.repository import JsonFileTenantRepository, TenantNotFoundError
-from app.tenancy.sync import _service_rows, _tenant_row
+from app.tenancy.repository import JsonFileTenantRepository
 from app.tenancy.supabase_repository import SupabaseTenantRepository
+from app.tenancy.sync import _service_rows, _tenant_row
 from tests.conftest import mock_http
 
 

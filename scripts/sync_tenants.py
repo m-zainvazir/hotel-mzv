@@ -117,9 +117,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     if args.export:
-        tenant_ids = (
-            [args.tenant] if args.tenant else get_repository().list_ids()
-        )
+        tenant_ids = [args.tenant] if args.tenant else get_repository().list_ids()
         if not tenant_ids:
             console.print("[dim]no tenants found[/dim]")
             return 0
@@ -129,7 +127,7 @@ def main(argv: list[str] | None = None) -> int:
         console.print(
             "[bold red]error:[/bold red] TENANT_SOURCE=supabase — the running app already "
             "treats Supabase as the source of truth, so pushing from disk would silently "
-            "overwrite any edit made through the admin panel (\"the sync stomp\", "
+            'overwrite any edit made through the admin panel ("the sync stomp", '
             "plans/phase8.md). Pass --force if you genuinely mean to push disk -> Supabase, "
             "or --export to pull the other direction first."
         )

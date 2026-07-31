@@ -299,7 +299,9 @@ def test_health_reports_admin_missing_when_enabled_but_not_built(client, monkeyp
         reset_settings_cache()
 
 
-def test_health_admin_not_reported_as_a_problem_when_admin_is_disabled(client, monkeypatch, tmp_path):
+def test_health_admin_not_reported_as_a_problem_when_admin_is_disabled(
+    client, monkeypatch, tmp_path
+):
     """A box that never opted into ADMIN_ENABLED shouldn't get a spurious
     "problem" for a bundle it was never asked to build."""
     import app.main as main_module
@@ -321,9 +323,7 @@ def test_route_ordering_admin_api_is_never_shadowed_by_the_spa_catch_all(client,
     monkeypatch.setenv("ADMIN_AUTH_TOKEN", "a" * 40)
     reset_settings_cache()
     try:
-        response = client.get(
-            "/admin/api/tenants", headers={"Authorization": f"Bearer {'a' * 40}"}
-        )
+        response = client.get("/admin/api/tenants", headers={"Authorization": f"Bearer {'a' * 40}"})
         assert response.status_code == 200
         assert response.headers["content-type"].startswith("application/json")
     finally:

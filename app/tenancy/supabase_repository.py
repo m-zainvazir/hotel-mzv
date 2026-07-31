@@ -115,9 +115,7 @@ class SupabaseTenantRepository:
                 await client.aclose()
 
         if not isinstance(rows, list):
-            logger.error(
-                "SupabaseTenantRepository.refresh(): /tenants returned a non-list body"
-            )
+            logger.error("SupabaseTenantRepository.refresh(): /tenants returned a non-list body")
             self.degraded = True
             return
 

@@ -221,7 +221,8 @@ class TestSaveTenant:
             if request.url.path == "/tenants" and request.method == "GET":
                 return _tenants_get("v1", voice_id=None)
             if request.url.path == "/voice_consents":
-                return httpx.Response(200, json=[{"tenant_id": hotel.tenant_id}])  # passes pre-check
+                # passes the pre-check
+                return httpx.Response(200, json=[{"tenant_id": hotel.tenant_id}])
             if request.url.path == "/tenants" and request.method == "POST":
                 return httpx.Response(
                     400, text='{"code":"P0001","message":"no voice_consents row"}'
@@ -359,9 +360,7 @@ class TestPutTenantRoute:
     def test_every_existing_validator_produces_a_422_with_a_field_path(
         self, admin_client, payload, expected_loc
     ):
-        response = admin_client.put(
-            "/admin/api/tenants/hotel-mzv", json=payload, headers=_bearer()
-        )
+        response = admin_client.put("/admin/api/tenants/hotel-mzv", json=payload, headers=_bearer())
         assert response.status_code == 422
         errors = response.json()["detail"]
         assert errors  # at least one error was reported
@@ -369,9 +368,7 @@ class TestPutTenantRoute:
             assert any(list(err["loc"]) == expected_loc for err in errors), errors
 
     def test_unknown_tenant_is_404(self, admin_client):
-        response = admin_client.put(
-            "/admin/api/tenants/does-not-exist", json={}, headers=_bearer()
-        )
+        response = admin_client.put("/admin/api/tenants/does-not-exist", json={}, headers=_bearer())
         assert response.status_code == 404
 
     def test_version_conflict_maps_to_409(self, admin_client, monkeypatch):
@@ -421,9 +418,7 @@ class TestPutTenantRoute:
             app.dependency_overrides.pop(require_admin, None)
         assert response.status_code == 403
 
-    def test_a_tenant_principal_may_still_edit_ordinary_fields(
-        self, admin_client, monkeypatch
-    ):
+    def test_a_tenant_principal_may_still_edit_ordinary_fields(self, admin_client, monkeypatch):
         async def _fake_save(config, *, expected_version, client=None):
             return config
 
