@@ -10,36 +10,36 @@
   "widget_keys": [
     "pk_widget_hotelmzv_demo"
   ],
-  "greeting": "Thanks for calling Hotel_MZV, this is Robin. How can I help you today?",
+  "greeting": "Thanks for calling Hotel_MZV, this is Zain. How can I help you today?",
   "persona": "Warm, composed and genuinely hospitable. Sounds like a senior front-desk manager who has looked after thousands of guests. Never uses jargon unless the caller does first.",
   "hours": {
-    "monday": {
-      "open": "07:00",
-      "close": "22:00"
-    },
-    "tuesday": {
-      "open": "07:00",
-      "close": "22:00"
-    },
-    "wednesday": {
-      "open": "07:00",
-      "close": "22:00"
-    },
-    "thursday": {
-      "open": "07:00",
-      "close": "22:00"
-    },
     "friday": {
-      "open": "07:00",
-      "close": "22:00"
+      "open": "07:00:00",
+      "close": "22:00:00"
     },
-    "saturday": {
-      "open": "07:00",
-      "close": "22:00"
+    "monday": {
+      "open": "07:00:00",
+      "close": "22:00:00"
     },
     "sunday": {
-      "open": "07:00",
-      "close": "22:00"
+      "open": "07:00:00",
+      "close": "22:00:00"
+    },
+    "tuesday": {
+      "open": "07:00:00",
+      "close": "22:00:00"
+    },
+    "saturday": {
+      "open": "07:00:00",
+      "close": "22:00:00"
+    },
+    "thursday": {
+      "open": "07:00:00",
+      "close": "22:00:00"
+    },
+    "wednesday": {
+      "open": "07:00:00",
+      "close": "22:00:00"
     }
   },
   "services": [
@@ -49,6 +49,7 @@
       "description": "Book a room for the guest's stay.",
       "duration_minutes": 30,
       "price_usd": null,
+      "emergency": false,
       "aliases": [
         "book a room",
         "reservation",
@@ -57,7 +58,8 @@
         "double room",
         "suite",
         "overnight"
-      ]
+      ],
+      "event_type_id": null
     },
     {
       "slug": "restaurant-table",
@@ -65,13 +67,15 @@
       "description": "Reserve a table at the hotel restaurant.",
       "duration_minutes": 90,
       "price_usd": null,
+      "emergency": false,
       "aliases": [
         "table",
         "dinner",
         "lunch",
         "restaurant",
         "book a table"
-      ]
+      ],
+      "event_type_id": null
     },
     {
       "slug": "spa-treatment",
@@ -79,13 +83,15 @@
       "description": "Book a massage, facial or other spa service.",
       "duration_minutes": 60,
       "price_usd": 120.0,
+      "emergency": false,
       "aliases": [
         "massage",
         "spa",
         "facial",
         "treatment",
         "sauna"
-      ]
+      ],
+      "event_type_id": null
     },
     {
       "slug": "event-space",
@@ -93,6 +99,7 @@
       "description": "Reserve the function room for a private event.",
       "duration_minutes": 240,
       "price_usd": 800.0,
+      "emergency": false,
       "aliases": [
         "conference",
         "function room",
@@ -100,7 +107,8 @@
         "banquet",
         "event",
         "private dining"
-      ]
+      ],
+      "event_type_id": null
     },
     {
       "slug": "airport-transfer",
@@ -108,31 +116,34 @@
       "description": "Arrange a car to or from the airport.",
       "duration_minutes": 60,
       "price_usd": 75.0,
+      "emergency": false,
       "aliases": [
         "pickup",
         "shuttle",
         "taxi",
         "airport",
         "car to the airport"
-      ]
+      ],
+      "event_type_id": null
     },
     {
       "slug": "urgent-assistance",
       "name": "Urgent assistance",
       "description": "Same-day response for a guest who needs help right now.",
       "duration_minutes": 15,
+      "price_usd": null,
       "emergency": true,
       "aliases": [
         "urgent",
         "emergency",
         "right now",
         "asap"
-      ]
+      ],
+      "event_type_id": null
     }
   ],
   "emergency": {
     "escalation_phone": "+15551230911",
-    "allow_warm_transfer": false,
     "keywords": [
       "fire",
       "smoke",
@@ -153,12 +164,15 @@
       "carbon monoxide",
       "gas leak"
     ],
-    "holding_message": "That sounds serious \u2014 please stay where you are and keep away from any danger. I'm getting our duty manager on the line right now.",
-    "alert_template": "EMERGENCY at Hotel_MZV \u2014 {customer_name} ({customer_phone}): {reason}. Guest is on the line now."
+    "holding_message": "That sounds serious — please stay where you are and keep away from any danger. I'm getting our duty manager on the line right now.",
+    "alert_template": "EMERGENCY at Hotel_MZV — {customer_name} ({customer_phone}): {reason}. Guest is on the line now.",
+    "allow_warm_transfer": false
   },
   "booking": {
     "provider": "calcom",
+    "calendar_id": null,
     "event_type_id": 6446177,
+    "booking_field_map": {},
     "require_address": false,
     "slot_granularity_minutes": 30,
     "lead_time_hours": 2,
@@ -182,16 +196,34 @@
     "max_duration_seconds": 600,
     "silence_timeout_seconds": 20
   },
+  "chat": {
+    "allowed_origins": [],
+    "accent_color": "#0f766e",
+    "launcher_label": "Chat with us",
+    "quick_replies": true,
+    "greeting": null
+  },
   "mcp_servers": [
     {
       "name": "demo",
+      "enabled": true,
       "transport": "http",
-      "url": "http://127.0.0.1:8765/mcp"
+      "url": "http://127.0.0.1:8765/mcp",
+      "headers": {},
+      "tool_allowlist": [],
+      "command": null,
+      "args": [],
+      "auth_secret_ref": null
     },
     {
       "name": "tavily",
+      "enabled": true,
       "transport": "http",
       "url": "https://mcp.tavily.com/mcp/?tavilyApiKey=${secret}",
+      "headers": {},
+      "tool_allowlist": [],
+      "command": null,
+      "args": [],
       "auth_secret_ref": "TAVILY_API_KEY"
     }
   ]
