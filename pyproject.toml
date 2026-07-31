@@ -47,7 +47,17 @@ google = [
 # cleanly on this box, but app/mcp/client.py still imports it lazily and
 # degrades to no MCP tools on ImportError, since that isn't guaranteed on
 # every box (see the uuid_utils gotcha above).
-mcp = ["langchain-mcp-adapters>=0.3"]
+# `mcp<2.0` is an explicit ceiling of our own, not langchain-mcp-adapters's:
+# it declares only `mcp>=1.24.0` with no upper bound, so a fresh install pulls
+# whatever's newest today. `mcp` 2.0.0 (released after Phase 8) restructured
+# `mcp.shared.context` and dropped `RequestContext` from it, which
+# `langchain_mcp_adapters.callbacks` imports at module load — breaking every
+# import of `langchain_mcp_adapters.client`, and with it every test that
+# monkeypatches `langchain_mcp_adapters.client.MultiServerMCPClient` by string
+# path (tests/test_mcp_loader.py, tests/test_tenant_isolation.py's isolation
+# test). Invisible on this dev box (mcp 1.28.1 was already installed before
+# 2.0.0 existed); CI's fresh install had no such history.
+mcp = ["langchain-mcp-adapters>=0.3", "mcp<2.0"]
 # Durable conversation memory (Phase 4 Step 7). Optional and self-degrading:
 # app/brain/graph.py falls back to InMemorySaver with a WARNING if this
 # isn't installed, so a blocked compiled DLL (see the uuid_utils gotcha
