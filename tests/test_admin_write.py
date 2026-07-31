@@ -20,7 +20,7 @@ from fastapi.testclient import TestClient
 
 import app.channels.admin as admin_module
 from app.channels.admin_auth import AdminPrincipal, require_admin
-from app.config import reset_settings_cache
+from app.config import get_settings, reset_settings_cache
 from app.main import app
 from app.tenancy import loader
 from app.tenancy.admin import (
@@ -57,6 +57,29 @@ def _tenants_get(updated_at: str, voice_id: str | None = None) -> httpx.Response
 
 
 # --- app/tenancy/admin.py: direct unit tests --------------------------------
+
+
+def test_admin_client_carries_the_upsert_headers_sync_tenant_depends_on():
+    """Live-found regression: app/tenancy/admin.py used to build its OWN
+    Supabase client, missing the `Prefer: resolution=merge-duplicates`
+    header sync_tenant()'s upsert semantics depend on. save_tenant() passes
+    that client into sync_tenant(config, client=active) — and sync_tenant
+    only sets Prefer when it builds its OWN client, which an injected one
+    deliberately bypasses (the same convention every provider in this
+    codebase follows, so a test can inject bare headers). The result was a
+    live 409 duplicate-key error on every admin-panel save: PostgREST fell
+    back to a plain INSERT instead of an upsert. No offline test caught this
+    because mock_http's mock doesn't simulate PostgREST's Prefer-dependent
+    upsert-vs-insert behaviour — only a real request against a real
+    database exposes it. Fixed by deleting the duplicate and reusing
+    app/tenancy/sync.py's own (already-correct, already-tested-in-
+    production-via-scripts/sync_tenants.py) client builder instead of
+    re-implementing it a second time."""
+    from app.tenancy.admin import _admin_client
+
+    client = _admin_client(get_settings(), timeout=8.0)
+    assert "merge-duplicates" in client.headers["prefer"]
+    assert "return=representation" in client.headers["prefer"]
 
 
 class TestSaveTenant:

@@ -29,7 +29,7 @@ import httpx
 from app.config import get_settings
 from app.tenancy.loader import clear_tenant_cache, get_repository
 from app.tenancy.models import TenantConfig
-from app.tenancy.sync import TenantSyncError, sync_tenant
+from app.tenancy.sync import TenantSyncError, _admin_client, sync_tenant
 
 logger = logging.getLogger(__name__)
 
@@ -94,17 +94,6 @@ def operator_only_violations(current: TenantConfig, proposed: TenantConfig) -> l
     ]
 
 
-def _admin_client(settings) -> httpx.AsyncClient:
-    return httpx.AsyncClient(
-        base_url=f"{settings.supabase_url}/rest/v1",
-        headers={
-            "apikey": settings.supabase_secret_key or "",
-            "Authorization": f"Bearer {settings.supabase_secret_key}",
-        },
-        timeout=settings.supabase_timeout_seconds,
-    )
-
-
 async def _current_row(
     tenant_id: str, client: httpx.AsyncClient
 ) -> dict[str, Any] | None:
@@ -144,7 +133,7 @@ async def get_tenant_version(
     # SupabaseTenantRepository needed for the identical reason.
     if owns_client and (not settings.supabase_url or not settings.supabase_secret_key):
         return None
-    active = client or _admin_client(settings)
+    active = client or _admin_client(settings, timeout=settings.supabase_timeout_seconds)
     try:
         row = await _current_row(tenant_id, active)
         return row.get("updated_at") if row else None
@@ -171,7 +160,7 @@ async def save_tenant(
     """
     settings = get_settings()
     owns_client = client is None
-    active = client or _admin_client(settings)
+    active = client or _admin_client(settings, timeout=settings.supabase_timeout_seconds)
     try:
         current = await _current_row(config.tenant_id, active)
 

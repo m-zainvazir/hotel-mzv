@@ -457,6 +457,26 @@ Supabase-Auth per-tenant login mini-plan went in beside it as item 14.
   settings...)`, matching the pattern every other injectable provider in
   this codebase (`CalcomBookingProvider`, `TwilioNotifier`, `SupabaseStore`)
   already used.
+- **A live-only bug offline tests structurally could not catch: two
+  divergent `_admin_client()` builders.** `app/tenancy/admin.py` had its own
+  copy of the Supabase client builder, missing the `Prefer:
+  resolution=merge-duplicates,return=representation` header
+  `app/tenancy/sync.py`'s version carries. `save_tenant()` passes its client
+  into `sync_tenant(config, client=active)`, and `sync_tenant` only sets
+  `Prefer` when building its *own* client — an injected one is used exactly
+  as given (the same convention that lets tests inject bare headers). Net
+  effect: every real admin-panel save silently downgraded from an upsert to
+  a plain `INSERT`, producing a live `23505` duplicate-key 500 on the very
+  first edit to an existing tenant. `mock_http`'s mock doesn't simulate
+  PostgREST's `Prefer`-dependent upsert-vs-insert behaviour, so every
+  offline test (both files inject their own client, bypassing either
+  builder entirely) stayed green throughout — only a real request against a
+  real database exposes this class of bug, which is the whole reason Step
+  10 (live verification) exists rather than being skippable. Fixed by
+  deleting the duplicate and importing `app/tenancy/sync.py`'s
+  already-correct one; `tests/test_admin_write.py` now asserts on the real
+  builder's headers directly (no mock in the loop) so this can't regress
+  silently again.
 - **`admin/` mirrors `widget/`'s conventions, but isn't an embed contract.**
   Preact + TypeScript, a committed `dist/` guarded by a `.buildhash`
   (`tests/test_admin_bundle.py` — a second artifact with the same "skip
