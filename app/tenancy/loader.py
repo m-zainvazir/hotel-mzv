@@ -7,6 +7,7 @@ that ever touches the repository.
 
 from __future__ import annotations
 
+import logging
 import time
 from threading import RLock
 
@@ -14,9 +15,12 @@ from app.config import get_settings
 from app.tenancy.models import TenantConfig
 from app.tenancy.repository import (
     JsonFileTenantRepository,
+    TenantArchivedError,
     TenantNotFoundError,
     TenantRepository,
 )
+
+logger = logging.getLogger(__name__)
 
 _lock = RLock()
 _repository: TenantRepository | None = None
@@ -44,6 +48,28 @@ def clear_tenant_cache() -> None:
         _cache.clear()
 
 
+async def refresh_tenant_repository() -> None:
+    """Refresh whatever's currently serving reads, after any write that
+    changed Supabase. Duck-typed: json mode's `JsonFileTenantRepository` has
+    neither method, so this is a no-op there — exactly right, since
+    `content/tenants/*.json` wasn't the thing that changed. Shared by every
+    Supabase write across the codebase (`app/tenancy/admin.py`'s
+    `save_tenant`/`create_tenant`/`set_tenant_status`/`purge_tenant`, and
+    `app/channels/vapi_provisioning.py`'s Supabase-only fallback) — without
+    it, a change doesn't appear until the 300s background refresh, which is
+    exactly the "phantom edit" class of bug plans/phase8.md documents.
+    """
+    clear_tenant_cache()
+    repository = get_repository()
+    refresh = getattr(repository, "refresh", None)
+    if refresh is not None:
+        await refresh()
+    else:
+        invalidate = getattr(repository, "invalidate", None)
+        if invalidate is not None:
+            invalidate()
+
+
 def get_tenant_config(tenant_id: str) -> TenantConfig:
     """Load a tenant profile, memoised for `TENANT_CACHE_TTL_SECONDS`."""
     ttl = get_settings().tenant_cache_ttl_seconds
@@ -59,6 +85,18 @@ def get_tenant_config(tenant_id: str) -> TenantConfig:
     with _lock:
         _cache[tenant_id] = (now, config)
     return config
+
+
+def _refuse_if_archived(config: TenantConfig) -> None:
+    """Every successful resolution below goes through this — a soft-deleted
+    (`status: "archived"`, Phase 9 Part B) bot must not answer on any
+    channel, no matter how it was addressed (explicit id, assistant id,
+    dialled number, or widget key)."""
+    if config.status == "archived":
+        logger.warning(
+            "refusing archived tenant %s — resolved but not serving it", config.tenant_id
+        )
+        raise TenantArchivedError(f"tenant {config.tenant_id!r} is archived")
 
 
 def resolve_tenant_id(
@@ -79,21 +117,25 @@ def resolve_tenant_id(
     single-tenant deployment needs no special-casing.
     """
     if tenant_id:
-        get_tenant_config(tenant_id)  # validates existence
+        config = get_tenant_config(tenant_id)  # validates existence
+        _refuse_if_archived(config)
         return tenant_id
 
     repository = get_repository()
     if assistant_id:
         config = repository.find_by_assistant_id(assistant_id)
         if config:
+            _refuse_if_archived(config)
             return config.tenant_id
     if phone_number:
         config = repository.find_by_phone(phone_number)
         if config:
+            _refuse_if_archived(config)
             return config.tenant_id
     if widget_key:
         config = repository.find_by_widget_key(widget_key)
         if config:
+            _refuse_if_archived(config)
             return config.tenant_id
 
     # An unknown assistant id is not fatal on its own: a freshly provisioned
@@ -106,5 +148,6 @@ def resolve_tenant_id(
         )
 
     default_id = get_settings().default_tenant_id
-    get_tenant_config(default_id)
+    config = get_tenant_config(default_id)
+    _refuse_if_archived(config)
     return default_id

@@ -204,6 +204,40 @@ def test_detach_clears_the_number_but_keeps_the_assistant(tmp_path, hotel):
     assert written["vapi"]["assistant_id"] == "a", "web call must survive a detach"
 
 
+def test_no_json_file_and_no_tenant_raises_a_clear_error(tmp_path):
+    """A panel-created tenant (Supabase-only, no JSON file — Phase 9 Part B)
+    with no tenant config supplied must fail loudly, not with a bare
+    FileNotFoundError from inside json.loads."""
+    with pytest.raises(ProvisioningError):
+        save_vapi_ids("no-such-tenant", data_dir=tmp_path, assistant_id="asst_1")
+
+
+def test_no_json_file_falls_back_to_syncing_the_tenant_to_supabase(tmp_path, hotel, monkeypatch):
+    """Found live (2026-08-03): provisioning Vapi for a panel-created tenant
+    used to create a real assistant successfully, then crash here trying to
+    read a JSON file that was never supposed to exist — orphaning the
+    assistant, never linked back to the tenant. `tenant=` is what lets this
+    branch to a Supabase write instead.
+
+    A plain (not async def) test, deliberately: save_vapi_ids calls
+    asyncio.run() internally, matching provision_vapi.py's own plain-sync
+    main() — asyncio.run() cannot be called from a running event loop, which
+    an async test function would already be inside.
+    """
+    synced = []
+
+    async def fake_sync_tenant(config, *, client=None):
+        synced.append(config)
+
+    monkeypatch.setattr("app.tenancy.sync.sync_tenant", fake_sync_tenant)
+
+    save_vapi_ids(hotel.tenant_id, data_dir=tmp_path, assistant_id="asst_supabase", tenant=hotel)
+
+    assert not (tmp_path / f"{hotel.tenant_id}.json").exists()
+    assert len(synced) == 1
+    assert synced[0].vapi.assistant_id == "asst_supabase"
+
+
 def test_written_file_still_parses_as_a_tenant(tmp_path):
     source = json.loads((Settings().tenant_data_dir / "hotel-mzv.json").read_text(encoding="utf-8"))
     path = tmp_path / "hotel-mzv.json"

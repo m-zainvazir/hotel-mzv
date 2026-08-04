@@ -142,6 +142,78 @@ async def test_refresh_picks_up_a_changed_row(hotel):
     assert repo.get("hotel-mzv").greeting == "Updated greeting from Supabase"
 
 
+async def test_a_cold_start_timeout_is_retried_once_and_recovers(hotel):
+    """The live-observed Phase 8 failure: the first HTTPS call of a fresh
+    process pays DNS + TLS on top of the query, times out, and the app then
+    silently serves the baked-in JSON fallback for a whole refresh interval.
+    A single retry on the now-warm connection closes it."""
+    attempts = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            raise httpx.ReadTimeout("", request=request)
+        return httpx.Response(200, json=[_row_for(hotel)])
+
+    client, _ = mock_http(handler)
+    repo = SupabaseTenantRepository(
+        fallback=JsonFileTenantRepository(directory=_content_dir()), client=client
+    )
+    await repo.refresh()
+
+    assert attempts["n"] == 2
+    assert repo.degraded is False
+    assert repo.get("hotel-mzv") == hotel
+
+
+async def test_a_persistent_transport_failure_still_degrades_cleanly(hotel):
+    attempts = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        attempts["n"] += 1
+        raise httpx.ConnectError("", request=request)
+
+    client, _ = mock_http(handler)
+    repo = SupabaseTenantRepository(
+        fallback=JsonFileTenantRepository(directory=_content_dir()), client=client
+    )
+    await repo.refresh()
+
+    assert attempts["n"] == 2  # tried twice, then gave up
+    assert repo.degraded is True
+    assert repo.get("hotel-mzv") == hotel  # JSON fallback
+
+
+async def test_an_http_error_response_is_not_retried(hotel):
+    """A 4xx/5xx means the server answered — a bad key, a missing table, a
+    broken embed. Retrying cannot fix any of those and would only double the
+    boot delay before the identical failure."""
+    attempts = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        attempts["n"] += 1
+        return httpx.Response(401, text="invalid api key")
+
+    client, _ = mock_http(handler)
+    repo = SupabaseTenantRepository(
+        fallback=JsonFileTenantRepository(directory=_content_dir()), client=client
+    )
+    await repo.refresh()
+
+    assert attempts["n"] == 1
+    assert repo.degraded is True
+
+
+def test_the_boot_snapshot_has_its_own_timeout_not_the_request_shaped_one():
+    """Regression guard for the live-observed cold-start failure: sharing
+    `supabase_timeout_seconds` (shaped for per-request business queries on the
+    latency budget) made a cold boot intermittently fall back to JSON."""
+    from app.config import get_settings
+
+    settings = get_settings()
+    assert settings.tenant_snapshot_timeout_seconds > settings.supabase_timeout_seconds
+
+
 def _content_dir():
     from app.config import get_settings
 

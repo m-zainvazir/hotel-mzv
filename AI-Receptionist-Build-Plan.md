@@ -270,6 +270,20 @@ file (`app/tools/booking/calcom.py`) rather than a rewrite, as designed. Google 
 remains available behind the same interface (`app/tools/booking/google.py`, still a
 stub) if a future tenant needs Workspace-native sync.
 
+**Amendment (Phase 9): the interface pays off a second time — Cal.com moves behind
+MCP without the brain noticing.** `plans/phase9.md` adds `McpBookingProvider`, a
+fourth implementation of this same ABC that reaches Cal.com through its hosted MCP
+server rather than its REST API. The critical detail is *where* the swap happens:
+at the **provider** layer, not the tool tier. `check_availability` and `book_job`
+stay native and typed, so the widget's slot-chip artifact, the booking-specific
+spoken acknowledgements, the local `jobs` row `send_confirmation` depends on, and
+the guarded `ERROR:` strings all survive unchanged — every one of which breaks if
+the model calls MCP booking tools directly. This section's core claim ("a tenant
+that wants a different provider later is a config flip, not a rewrite") now holds
+for a change of *transport*, not just a change of vendor. Supabase still holds the
+authoritative `jobs` row; the MCP server's booking uid is a link, exactly as
+before.
+
 ---
 
 ## 11. MCP integration layer
@@ -319,6 +333,22 @@ same generic config path, no per-vendor code.
   CLAUDE.md's gotchas for the full account.
 
 See `plans/phase6.md` for the full implementation record and live-verification checklist.
+
+**Amendment (Phase 9): MCP is no longer only the long tail — but the two-tier rule
+still holds.** This section frames MCP entirely as "the long tail, not the booking
+critical path," and `plans/phase9.md` puts Cal.com behind an MCP server. Those are
+compatible, and the distinction matters: MCP becomes a **transport** for a
+critical-path integration, consumed by a `BookingProvider` implementation, while
+the *tool tier* is untouched — the model still calls the same five native, typed,
+validated tools and never sees an MCP booking tool bound. "Keep the truly
+latency-sensitive actions as native typed tools" remains true as written. The one
+genuinely new constraint is latency: an MCP session handshake on the availability
+path would breach §13, so the provider caches a per-tenant session, and the
+`"calcom"` REST implementation stays in the tree as a one-word revert. Note also
+that Cal.com's hosted server authenticates with **OAuth 2.1** — a third auth shape
+beyond the header and query-parameter forms this section's `${secret}` design
+covers — handled by a one-time interactive authorization per tenant whose refresh
+token lives in Vault.
 
 ---
 
@@ -422,7 +452,15 @@ that section's amendment). *Phase 8's actual done-when:* an operator can see
 what a tenant's receptionist did and change what it says, with the edit
 live on the very next turn — no redeploy.
 
-**Ballpark: a production-grade dual-channel MVP (Phases 0–7) in ~3 weeks; Phase 8 (analytics + admin) and the deferred avatar on top.**
+**Phase 9 — Platform: MCP booking, bot lifecycle, per-bot knowledge (added 1 Aug 2026; 10–14 days).** Three additions that turn a working deployment into something that grows (`plans/phase9.md`):
+
+- **Cal.com moves behind MCP.** A new `McpBookingProvider` implements the unchanged `BookingProvider` interface against Cal.com's hosted MCP server, so the calendar is reached only through MCP while the model's tool surface stays byte-identical. This is the §10 interface paying off a second time — the swap is a new file and a one-word tenant JSON flip, exactly as the Cal.com-over-Google swap was. **No tier-1 tool becomes model-facing MCP**; §11's two-tier rule is unchanged.
+- **Bot lifecycle in the admin panel.** The platform has been multi-bot since Phase 4 — a tenant *is* a bot, with its own prompt, persona, services, hours, voice, calendar and MCP servers — but there was no way to create one without a shell and no way to remove one at all. Phase 9 adds create (blank, from a trade template, or cloned), archive/restore, and an operator-only ordered purge, all from `/admin`. This is §6d's onboarding flow finally becoming a button.
+- **Per-bot RAG.** A knowledge base every bot gets: pgvector in Supabase behind a `KnowledgeStore` protocol, Gemini embeddings, and a `search_knowledge` native tool the model calls. Ingestion is paste-text, multi-file upload (`.pdf .docx .md .txt .csv`) and URL crawl. Nothing in §1–§14 anticipated this; it is the first capability that lets a bot answer from documents rather than only from its prompt.
+
+*Done when:* a tenant books through MCP with no observable change in the conversation; an operator creates a second-trade bot in the panel, talks to it, and purges it; and a bot answers a question from an uploaded document that appears nowhere in its prompt.
+
+**Ballpark: a production-grade dual-channel MVP (Phases 0–7) in ~3 weeks; Phase 8 (analytics + admin), Phase 9 (platform) and the deferred avatar on top.**
 
 ---
 

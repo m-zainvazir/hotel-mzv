@@ -30,6 +30,9 @@ from app.db.models import (
     DailyMetrics,
     Escalation,
     Job,
+    KnowledgeChunk,
+    KnowledgeDocument,
+    KnowledgeHit,
     OutboundMessage,
     TenantMetrics,
 )
@@ -164,3 +167,68 @@ class AnalyticsStore(Protocol):
 
     def get_call(self, tenant_id: str, call_id: str) -> Call | None: ...
     async def aget_call(self, tenant_id: str, call_id: str) -> Call | None: ...
+
+
+@runtime_checkable
+class KnowledgeStore(Protocol):
+    """Per-bot RAG knowledge base (Phase 9 Part C) — the swap seam a future
+    Qdrant/Pinecone implementation would slot into (`knowledge_source`,
+    app/config.py). `tenant_id` first wherever the model itself doesn't
+    already carry it, matching `JobStore`'s existing convention exactly.
+    """
+
+    def add_document(self, document: KnowledgeDocument) -> KnowledgeDocument: ...
+    async def aadd_document(self, document: KnowledgeDocument) -> KnowledgeDocument: ...
+
+    def list_documents(self, tenant_id: str) -> list[KnowledgeDocument]: ...
+    async def alist_documents(self, tenant_id: str) -> list[KnowledgeDocument]: ...
+
+    def get_document(self, tenant_id: str, document_id: str) -> KnowledgeDocument | None: ...
+    async def aget_document(self, tenant_id: str, document_id: str) -> KnowledgeDocument | None: ...
+
+    #: Cascades to that document's chunks (FK `on delete cascade`,
+    #: 0011_knowledge.sql) — callers never need a separate chunk cleanup.
+    def delete_document(self, tenant_id: str, document_id: str) -> None: ...
+    async def adelete_document(self, tenant_id: str, document_id: str) -> None: ...
+
+    def set_document_status(
+        self,
+        tenant_id: str,
+        document_id: str,
+        *,
+        status: str,
+        error: str | None = None,
+        chunk_count: int | None = None,
+    ) -> KnowledgeDocument: ...
+    async def aset_document_status(
+        self,
+        tenant_id: str,
+        document_id: str,
+        *,
+        status: str,
+        error: str | None = None,
+        chunk_count: int | None = None,
+    ) -> KnowledgeDocument: ...
+
+    #: A re-index replaces a document's whole chunk set — the caller
+    #: (`app/rag/ingest.py`) deletes-then-inserts rather than this method
+    #: diffing old vs. new chunks itself.
+    def upsert_chunks(self, tenant_id: str, chunks: list[KnowledgeChunk]) -> None: ...
+    async def aupsert_chunks(self, tenant_id: str, chunks: list[KnowledgeChunk]) -> None: ...
+
+    def search_chunks(
+        self,
+        tenant_id: str,
+        *,
+        query_embedding: list[float],
+        top_k: int,
+        min_similarity: float,
+    ) -> list[KnowledgeHit]: ...
+    async def asearch_chunks(
+        self,
+        tenant_id: str,
+        *,
+        query_embedding: list[float],
+        top_k: int,
+        min_similarity: float,
+    ) -> list[KnowledgeHit]: ...

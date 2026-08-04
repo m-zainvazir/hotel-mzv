@@ -32,9 +32,11 @@ from app.config import Settings, reset_settings_cache
 from app.db.auth import clear_jwt_cache
 from app.db.memory_store import get_store
 from app.mcp.client import clear_mcp_cache
+from app.mcp.oauth import clear_calcom_oauth_cache
 from app.tenancy.loader import clear_tenant_cache, get_repository, get_tenant_config
 from app.tenancy.models import TenantConfig
 from app.tenancy.secrets import clear_secret_cache
+from app.tools.booking.mcp_calcom import reset_session_cache as reset_calcom_mcp_sessions
 from app.tools.booking.stub import StubBookingProvider
 from app.tools.http_client import reset_shared_clients
 from app.tools.providers import reset_provider_overrides, set_booking_provider
@@ -237,6 +239,8 @@ def isolated_runtime():
     clear_jwt_cache()
     clear_secret_cache()
     clear_mcp_cache()
+    clear_calcom_oauth_cache()
+    reset_calcom_mcp_sessions()
     reset_rate_limits()
     seed_acknowledgements(1234)
     yield
@@ -251,6 +255,8 @@ def isolated_runtime():
     clear_jwt_cache()
     clear_secret_cache()
     clear_mcp_cache()
+    clear_calcom_oauth_cache()
+    reset_calcom_mcp_sessions()
 
 
 @pytest.fixture

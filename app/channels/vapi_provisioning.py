@@ -193,6 +193,14 @@ class VapiClient:
             "PATCH", f"/phone-number/{phone_number_id}", json={"assistantId": assistant_id}
         )
 
+    def delete_assistant(self, assistant_id: str) -> None:
+        """Phase 9 Part B — purge's Vapi cleanup. REST-conventional
+        (`DELETE /assistant/{id}`, matching the GET/PATCH/POST shapes above)
+        but unverified against a live call, same caveat every other
+        Vapi-wire-format assumption in this codebase carries until it's
+        actually exercised — see CLAUDE.md's `vapi_schema.py` gotcha."""
+        self._request("DELETE", f"/assistant/{assistant_id}")
+
 
 # --- tenant file write-back -------------------------------------------------
 
@@ -203,13 +211,36 @@ def save_vapi_ids(
     data_dir: Path,
     assistant_id: str | None = None,
     phone_number_id: str | None = ...,  # type: ignore[assignment]
+    tenant: TenantConfig | None = None,
 ) -> None:
-    """Persist provisioning results back into the tenant's JSON.
+    """Persist provisioning results back into the tenant's JSON — or, for a
+    panel-created tenant with no JSON file at all (Supabase-only, Phase 9
+    Part B by design), into its Supabase `tenants` row instead.
 
     `phone_number_id` uses a sentinel default so that *not passing it* differs
     from explicitly clearing it (detach).
+
+    Found live (2026-08-03): this unconditionally assumed a JSON file existed
+    for every tenant, the same gap `scripts/chat_cli.py`/`scripts/
+    provision_vapi.py` had for the read side — a panel-created tenant would
+    provision a real Vapi assistant successfully, then crash here trying to
+    save its id anywhere, leaving the assistant orphaned (never linked back
+    to the tenant). `tenant` (the already-resolved `TenantConfig`, passed by
+    the caller) is what lets this branch to a Supabase write instead of
+    assuming a file must exist.
     """
     path = data_dir / f"{tenant_id}.json"
+    if not path.is_file():
+        if tenant is None:
+            raise ProvisioningError(
+                f"{path} does not exist and no tenant config was supplied to "
+                "fall back to a Supabase write"
+            )
+        _save_vapi_ids_to_supabase(
+            tenant, assistant_id=assistant_id, phone_number_id=phone_number_id
+        )
+        return
+
     config = json.loads(path.read_text(encoding="utf-8"))
     vapi = dict(config.get("vapi") or {})
 
@@ -221,3 +252,35 @@ def save_vapi_ids(
     config["vapi"] = vapi
     path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
     logger.info("wrote vapi ids into %s", path.name)
+
+
+def _save_vapi_ids_to_supabase(
+    tenant: TenantConfig,
+    *,
+    assistant_id: str | None,
+    phone_number_id: str | None,  # sentinel-aware, see save_vapi_ids
+) -> None:
+    import asyncio
+
+    from app.tenancy.loader import refresh_tenant_repository
+    from app.tenancy.sync import sync_tenant
+
+    vapi_updates: dict[str, Any] = {}
+    if assistant_id is not None:
+        vapi_updates["assistant_id"] = assistant_id
+    if phone_number_id is not ...:
+        vapi_updates["phone_number_id"] = phone_number_id
+
+    vapi = tenant.vapi.model_copy(update=vapi_updates)
+    updated = tenant.model_copy(update={"vapi": vapi})
+
+    async def _sync_and_refresh() -> None:
+        await sync_tenant(updated)
+        # Without this, the SupabaseTenantRepository singleton (if one is
+        # active) keeps serving the snapshot it loaded at process start —
+        # found live (2026-08-03) as `--show`'s final panel still reporting
+        # "not provisioned" immediately after a successful provision.
+        await refresh_tenant_repository()
+
+    asyncio.run(_sync_and_refresh())
+    logger.info("wrote vapi ids into Supabase tenants row tenant_id=%s", tenant.tenant_id)

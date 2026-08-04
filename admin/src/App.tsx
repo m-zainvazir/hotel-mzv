@@ -1,7 +1,17 @@
 import { useEffect, useState } from "preact/hooks";
 
-import { AuthError, clearToken, getSession, getToken, listTenantIds, SessionInfo, setToken } from "./api";
-import { Route, tenantUrl, useRoute } from "./router";
+import {
+  AuthError,
+  clearToken,
+  getSession,
+  getToken,
+  listTenantIds,
+  SessionInfo,
+  setToken,
+  TenantSummary,
+} from "./api";
+import { newTenantUrl, Route, tenantUrl, useRoute } from "./router";
+import { NewTenantView } from "./views/NewTenant";
 import { Overview } from "./views/Overview";
 import { TenantView } from "./views/TenantView";
 
@@ -64,9 +74,9 @@ export function App() {
     <div class="admin-shell">
       <Sidebar route={route} session={session} onSignOut={signOut} />
       <main class="admin-main">
-        {route.name === "overview" ? (
-          <Overview />
-        ) : (
+        {route.name === "overview" && <Overview />}
+        {route.name === "new-tenant" && <NewTenantView />}
+        {route.name === "tenant" && (
           <TenantView tenantId={route.tenantId} tab={route.tab} session={session} />
         )}
       </main>
@@ -120,13 +130,35 @@ function Sidebar({
   session: SessionInfo;
   onSignOut: () => void;
 }) {
-  const [tenantIds, setTenantIds] = useState<string[]>([]);
+  const [tenants, setTenants] = useState<TenantSummary[]>([]);
+  const [showArchived, setShowArchived] = useState(false);
 
-  useEffect(() => {
+  function reload(): void {
     listTenantIds()
-      .then((body) => setTenantIds(body.tenant_ids))
-      .catch(() => setTenantIds([]));
-  }, []);
+      .then((body) => setTenants(body.tenants))
+      .catch(() => setTenants([]));
+  }
+
+  useEffect(reload, []);
+  // A create/archive/restore/purge action elsewhere in the app changes this
+  // list — cheapest correct fix is reloading on every route change rather
+  // than plumbing a refresh callback through three views.
+  useEffect(reload, [route]);
+
+  const live = tenants.filter((t) => t.status !== "archived");
+  const archived = tenants.filter((t) => t.status === "archived");
+
+  function tenantLink(tenant: TenantSummary) {
+    return (
+      <a
+        key={tenant.tenant_id}
+        href={tenantUrl(tenant.tenant_id)}
+        class={route.name === "tenant" && route.tenantId === tenant.tenant_id ? "active" : ""}
+      >
+        {tenant.tenant_id}
+      </a>
+    );
+  }
 
   return (
     <nav class="admin-sidebar">
@@ -134,18 +166,27 @@ function Sidebar({
       <a href="#/" class={route.name === "overview" ? "active" : ""}>
         Overview
       </a>
+      {session.kind === "operator" && (
+        <a href={newTenantUrl()} class={route.name === "new-tenant" ? "active" : ""}>
+          + New bot
+        </a>
+      )}
       <div class="admin-muted" style={{ margin: "0.75rem 0 0.25rem", fontSize: "0.72rem" }}>
         Tenants
       </div>
-      {tenantIds.map((tenantId) => (
-        <a
-          key={tenantId}
-          href={tenantUrl(tenantId)}
-          class={route.name === "tenant" && route.tenantId === tenantId ? "active" : ""}
-        >
-          {tenantId}
-        </a>
-      ))}
+      {live.map(tenantLink)}
+      {archived.length > 0 && (
+        <>
+          <button
+            class="admin-nav-link admin-muted"
+            style={{ fontSize: "0.72rem", textAlign: "left" }}
+            onClick={() => setShowArchived((v) => !v)}
+          >
+            {showArchived ? "▾" : "▸"} Archived ({archived.length})
+          </button>
+          {showArchived && archived.map(tenantLink)}
+        </>
+      )}
       <div style={{ flex: 1 }} />
       <div class="admin-muted" style={{ fontSize: "0.75rem" }}>
         Signed in as {session.kind}

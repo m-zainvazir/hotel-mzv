@@ -1,0 +1,95 @@
+{
+  "tenant_id": "template",
+  "name": "New Salon",
+  "trade": "salon",
+  "timezone": "America/New_York",
+  "status": "onboarding",
+  "phone_numbers": [],
+  "widget_keys": [],
+  "greeting": "Thanks for calling — how can I help you today?",
+  "persona": "Friendly, upbeat and welcoming. Talks about appointments the way a favorite stylist would.",
+  "hours": {
+    "monday": null,
+    "tuesday": { "open": "09:00:00", "close": "19:00:00" },
+    "wednesday": { "open": "09:00:00", "close": "19:00:00" },
+    "thursday": { "open": "09:00:00", "close": "19:00:00" },
+    "friday": { "open": "09:00:00", "close": "19:00:00" },
+    "saturday": { "open": "09:00:00", "close": "17:00:00" },
+    "sunday": null
+  },
+  "services": [
+    {
+      "slug": "haircut",
+      "name": "Haircut",
+      "description": "Wash, cut and style.",
+      "duration_minutes": 45,
+      "price_usd": null,
+      "emergency": false,
+      "aliases": ["haircut", "trim", "cut"],
+      "event_type_id": null
+    },
+    {
+      "slug": "color",
+      "name": "Color",
+      "description": "Full color or highlights.",
+      "duration_minutes": 120,
+      "price_usd": null,
+      "emergency": false,
+      "aliases": ["color", "highlights", "dye", "balayage"],
+      "event_type_id": null
+    },
+    {
+      "slug": "manicure",
+      "name": "Manicure",
+      "description": "Manicure or pedicure.",
+      "duration_minutes": 45,
+      "price_usd": null,
+      "emergency": false,
+      "aliases": ["manicure", "pedicure", "nails"],
+      "event_type_id": null
+    }
+  ],
+  "emergency": {
+    "escalation_phone": "+15550000000",
+    "keywords": ["allergic reaction", "burn", "chemical in eye"],
+    "holding_message": "That sounds like it needs attention right away — I'm getting our manager on the line right now.",
+    "alert_template": "URGENT — {customer_name} ({customer_phone}): {reason}. Caller is on the line now.",
+    "allow_warm_transfer": false
+  },
+  "booking": {
+    "provider": "stub",
+    "calendar_id": null,
+    "event_type_id": null,
+    "booking_field_map": {},
+    "require_address": false,
+    "slot_granularity_minutes": 15,
+    "lead_time_hours": 1,
+    "horizon_days": 14,
+    "max_slots_returned": 3
+  },
+  "notifications": {
+    "provider": "stub",
+    "from_number": null,
+    "confirmation_template": "You're booked for {service} on {when}. Reply here if anything changes."
+  },
+  "voice": {
+    "provider": "cartesia",
+    "voice_id": null,
+    "model": "sonic-2",
+    "speed": 1.0
+  },
+  "vapi": {
+    "assistant_id": null,
+    "phone_number_id": null,
+    "max_duration_seconds": 600,
+    "silence_timeout_seconds": 20
+  },
+  "chat": {
+    "allowed_origins": [],
+    "accent_color": "#0f766e",
+    "launcher_label": "Chat with us",
+    "quick_replies": true,
+    "greeting": null
+  },
+  "mcp_servers": []
+}

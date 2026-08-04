@@ -1,6 +1,16 @@
 import { useEffect, useState } from "preact/hooks";
 
-import { ApiError, getTenantConfig, saveTenantConfig, SessionInfo, TenantConfig } from "../api";
+import {
+  ApiError,
+  archiveTenant,
+  getTenantConfig,
+  purgeTenant,
+  restoreTenant,
+  saveTenantConfig,
+  SessionInfo,
+  TenantConfig,
+} from "../api";
+import { navigate } from "../router";
 
 const WEEKDAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"];
 
@@ -58,6 +68,13 @@ interface ChatValue {
   launcher_label: string;
   quick_replies: boolean;
   greeting: string | null;
+}
+
+interface KnowledgeValue {
+  enabled: boolean;
+  top_k: number;
+  min_similarity: number;
+  max_chunks: number;
 }
 
 interface McpServerValue {
@@ -186,7 +203,12 @@ export function ConfigView({ tenantId, session }: { tenantId: string; session: S
             <option value="active">active</option>
             <option value="paused">paused</option>
             <option value="onboarding">onboarding</option>
+            <option value="archived">archived</option>
           </select>
+          <span class="admin-muted" style={{ fontSize: "0.8rem" }}>
+            The Danger Zone below is the one-click way to archive/restore — same effect as
+            picking a value here and saving.
+          </span>
         </div>
         <ListField
           label="Phone numbers"
@@ -244,6 +266,12 @@ export function ConfigView({ tenantId, session }: { tenantId: string; session: S
         onChange={(v) => update("chat", v as never)}
       />
 
+      <KnowledgeSection
+        value={config.knowledge as unknown as KnowledgeValue}
+        onChange={(v) => update("knowledge", v as never)}
+        errors={fieldErrors}
+      />
+
       <McpServersSection
         value={(config.mcp_servers as McpServerValue[]) ?? []}
         onChange={(v) => update("mcp_servers", v as never)}
@@ -259,6 +287,115 @@ export function ConfigView({ tenantId, session }: { tenantId: string; session: S
       <button class="admin-btn" onClick={save} disabled={saving}>
         {saving ? "Saving…" : "Save changes"}
       </button>
+
+      {isOperator && (
+        <DangerZone tenantId={tenantId} status={config.status as string} onChanged={load} />
+      )}
+    </div>
+  );
+}
+
+function DangerZone({
+  tenantId,
+  status,
+  onChanged,
+}: {
+  tenantId: string;
+  status: string;
+  onChanged: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [confirmText, setConfirmText] = useState("");
+
+  const isArchived = status === "archived";
+
+  async function doArchive(): Promise<void> {
+    setBusy(true);
+    setError(null);
+    try {
+      await archiveTenant(tenantId);
+      onChanged();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "could not archive");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function doRestore(): Promise<void> {
+    setBusy(true);
+    setError(null);
+    try {
+      await restoreTenant(tenantId);
+      onChanged();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "could not restore");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function doPurge(): Promise<void> {
+    setBusy(true);
+    setError(null);
+    try {
+      await purgeTenant(tenantId, confirmText);
+      navigate("#/");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "could not purge");
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div class="admin-section admin-section--danger">
+      <h2>Danger Zone</h2>
+
+      {error && <div class="admin-error-banner">{error}</div>}
+
+      <div class="admin-danger-row">
+        <div>
+          <strong>{isArchived ? "Restore this bot" : "Archive this bot"}</strong>
+          <p class="admin-muted">
+            {isArchived
+              ? "Restoring flips status back to active — it answers on voice and chat again immediately."
+              : "Archiving stops this bot answering on voice and chat. Every row (jobs, calls, transcripts) is kept — this is reversible."}
+          </p>
+        </div>
+        <button
+          class="admin-btn admin-btn--secondary"
+          disabled={busy}
+          onClick={isArchived ? doRestore : doArchive}
+        >
+          {isArchived ? "Restore" : "Archive"}
+        </button>
+      </div>
+
+      <div class="admin-danger-row">
+        <div>
+          <strong>Purge this bot</strong>
+          <p class="admin-muted">
+            Irreversibly deletes every row this bot has — jobs, calls, chat transcripts,
+            escalations, everything. Only possible once archived. Type the tenant id (
+            <code>{tenantId}</code>) to confirm.
+          </p>
+          <input
+            type="text"
+            value={confirmText}
+            disabled={!isArchived || busy}
+            placeholder={tenantId}
+            onInput={(e) => setConfirmText((e.target as HTMLInputElement).value)}
+          />
+        </div>
+        <button
+          class="admin-btn admin-btn--danger"
+          disabled={!isArchived || busy || confirmText !== tenantId}
+          onClick={doPurge}
+        >
+          Purge permanently
+        </button>
+      </div>
     </div>
   );
 }
@@ -617,6 +754,7 @@ function BookingSection({
             <option value="stub">stub</option>
             <option value="google">google</option>
             <option value="calcom">calcom</option>
+            <option value="mcp_calcom">mcp_calcom (Cal.com via its hosted MCP server)</option>
           </select>
         </div>
         <NumberField
@@ -753,6 +891,52 @@ function ChatSection({ value, onChange }: { value: ChatValue; onChange: (v: Chat
           label="Quick replies"
           checked={value.quick_replies}
           onChange={(v) => onChange({ ...value, quick_replies: v })}
+        />
+      </div>
+    </div>
+  );
+}
+
+function KnowledgeSection({
+  value,
+  onChange,
+  errors,
+}: {
+  value: KnowledgeValue;
+  onChange: (v: KnowledgeValue) => void;
+  errors: FieldErrors;
+}) {
+  return (
+    <div class="admin-section">
+      <h2>Knowledge base</h2>
+      <p class="admin-muted">
+        Document search (see the Knowledge tab) only reaches conversations when this is on —
+        uploading and searching documents there works either way, but the bot itself won't use
+        them until "Enabled" is checked here and saved.
+      </p>
+      <CheckboxField
+        label="Enabled"
+        checked={value.enabled}
+        onChange={(v) => onChange({ ...value, enabled: v })}
+      />
+      <div class="admin-field-row">
+        <NumberField
+          label="Top K"
+          value={value.top_k}
+          onChange={(v) => onChange({ ...value, top_k: v })}
+          error={errors.get("knowledge.top_k")}
+        />
+        <NumberField
+          label="Min similarity"
+          value={value.min_similarity}
+          onChange={(v) => onChange({ ...value, min_similarity: v })}
+          error={errors.get("knowledge.min_similarity")}
+        />
+        <NumberField
+          label="Max chunks"
+          value={value.max_chunks}
+          onChange={(v) => onChange({ ...value, max_chunks: v })}
+          error={errors.get("knowledge.max_chunks")}
         />
       </div>
     </div>

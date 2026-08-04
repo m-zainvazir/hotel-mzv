@@ -280,11 +280,65 @@ table.admin-table tr:hover td {
   min-width: 10rem;
 }
 
-.admin-checkbox {
+.admin-checkbox,
+.admin-radio {
   display: flex;
   align-items: center;
   gap: 0.4rem;
   font-size: 0.875rem;
+}
+
+.admin-dropzone {
+  border: 2px dashed var(--admin-border);
+  border-radius: 0.6rem;
+  padding: 1.5rem;
+  text-align: center;
+  color: var(--admin-muted);
+  font-size: 0.875rem;
+  cursor: pointer;
+}
+
+.admin-dropzone--active {
+  border-color: var(--admin-accent);
+  color: var(--admin-text);
+}
+
+.admin-section--danger {
+  border-color: var(--admin-danger);
+}
+
+.admin-section--danger h2 {
+  color: var(--admin-danger);
+}
+
+.admin-danger-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.75rem 0;
+  border-top: 1px solid var(--admin-border);
+}
+
+.admin-danger-row:first-of-type {
+  border-top: none;
+  padding-top: 0;
+}
+
+.admin-danger-row > div:first-child {
+  flex: 1;
+}
+
+.admin-danger-row input[type="text"] {
+  margin-top: 0.4rem;
+  background: transparent;
+  color: inherit;
+  border: 1px solid var(--admin-border);
+  border-radius: 0.4rem;
+  padding: 0.4rem 0.6rem;
+  font-size: 0.875rem;
+  width: 100%;
+  max-width: 16rem;
 }
 
 .admin-day-row {

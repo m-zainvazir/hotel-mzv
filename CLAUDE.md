@@ -209,13 +209,14 @@ now has two endpoints, not one:
   boundary is `chat.allowed_origins`, checked once at the handshake.
 - **Live-verified against the real stack** (real Gemini model, real Cal.com,
   `store: "supabase"`): the handshake, a full streaming turn with `suggestions`
-  carrying real Cal.com slots, and event filtering all work end to end. One gap found
-  live and not yet closed: **`app/db/migrations/0006_chat.sql`
-  (`chat_sessions`/`chat_messages`) has not been applied to the live Supabase project**
-  — the same manual dashboard-SQL-editor step every prior migration needed. Until it
-  is, `_record_chat_message`/`astart_chat_session` fail with a 404 from PostgREST,
-  caught and logged (never breaking the stream — confirmed live, not just in tests),
-  so conversations still work end to end, they just aren't durably transcribed yet.
+  carrying real Cal.com slots, and event filtering all work end to end.
+  `app/db/migrations/0006_chat.sql` (`chat_sessions`/`chat_messages`) is **applied and
+  carrying real rows** — transcripts are durable now. Worth keeping in mind anyway: while
+  it was unapplied, `_record_chat_message`/`astart_chat_session` failed with a 404 from
+  PostgREST that was caught and logged and **never broke the stream** (confirmed live).
+  That degradation path is still the design — a store failure must never kill a live
+  conversation — so a future table/permission problem will be silent in exactly the same
+  way, visible only in the logs.
 
 **Phase 6 (MCP layer) is done — see `plans/phase6.md`.** `app/mcp/client.py` no longer
 returns `[]` unconditionally; the long tail (CLAUDE.md convention #2) is live:
@@ -261,10 +262,11 @@ returns `[]` unconditionally; the long tail (CLAUDE.md convention #2) is live:
 - **Native tools stay native.** No tier-1 tool moved to MCP; `check_availability` /
   `book_job` / `send_confirmation` / `escalate` / `is_emergency` are unchanged.
 
-Next: apply `0006_chat.sql` **and** `0007_mcp.sql` to the live Supabase project together
-(same manual dashboard-SQL-editor step every prior migration needed), then re-run
-`provision_vapi --tenant hotel-mzv` so the transfer number Vapi will actually dial
-matches `emergency.escalation_phone` (needed once regardless of Twilio). Twilio stays
+Next: **all nine migrations are applied** (Phase 7 Step 10 re-created the project with
+`0001`→`0007`; `0008`/`0009` landed with Phase 8 — verified live, see that section). What
+remains here is to re-run `provision_vapi --tenant hotel-mzv` so the transfer number Vapi
+will actually dial matches `emergency.escalation_phone` (needed once regardless of
+Twilio, and blocked on a real non-`555` number). Twilio stays
 parked until the client revisits that decision. Phase 4's own deferred items (a second
 real Cal.com account to prove cross-tenant booking end-to-end, the actual voice clone,
 the tenant read-path flip), Phase 5's and Phase 6's own (`plans/phase10.md`: WhatsApp,
@@ -351,11 +353,23 @@ assistant id returns a correct, contextual answer from the real Gemini model. No
 number is attached yet (Vapi web-call only) and Twilio stays parked — both remain the
 client's call, not blocked on anything technical.
 
-**Phase 8 (analytics dashboard + per-tenant admin) is code-complete — see
-`plans/phase8.md`.** Not yet live-verified against the real Supabase project
-(migrations `0008_analytics.sql` / `0009_admin.sql` are not yet applied there;
-that and a real Railway deploy with `ADMIN_ENABLED=true` are `plans/phase8.md`'s
-Step 10). Scope narrowed from plan §15's original "avatar + analytics + admin"
+**Phase 8 (analytics dashboard + per-tenant admin) is done and live-verified —
+see `plans/phase8.md`.** All nine migrations are applied to the live project and
+Step 10's checklist passed against it: the five analytics views carry
+`security_invoker=true` and return zero rows to the anon key while each tenant
+JWT sees only its own row; **the acceptance criterion holds — a greeting edited
+through `/admin` was served by the running app on the very next request, no
+restart, no redeploy**; invalid edits 422 with per-field `loc` paths and a stale
+`If-Match` 409s; the voice-consent gate 409s naming the exact `onboard_tenant`
+command; **`0009`'s trigger fix is proven defused live** (an unrelated save on a
+tenant that *has* a `voice_id` succeeds — see the gotcha below); removing a
+service deletes the orphan row; `sync_tenants` refuses to stomp live config
+without `--force` and `--export` round-trips semantically identical config; the
+admin limiter 429s with `Retry-After`. The one thing still not done is the
+*deployment switch*: `ADMIN_ENABLED` / `ADMIN_AUTH_TOKEN` / `TENANT_SOURCE` are
+not yet set on Railway, and must be set **together** or the phantom-edit
+preflight crashes the boot in between. Scope narrowed from plan §15's original
+"avatar + analytics + admin"
 by client decision — the video avatar moved to `plans/phase10.md` item 13, and a
 Supabase-Auth per-tenant login mini-plan went in beside it as item 14.
 
@@ -503,7 +517,252 @@ Supabase-Auth per-tenant login mini-plan went in beside it as item 14.
   and adds `"overrides": {"rollup": "4.62.2"}` for the same reason. See
   `admin/README.md`.
 
+**Phase 9 Part A (Cal.com through MCP) is done and live-verified —
+see `plans/phase9.md`.** `booking.provider: "mcp_calcom"` is a config flip
+from `"calcom"` that reaches the same Cal.com account through its official
+hosted MCP server (`https://mcp.cal.com`, OAuth 2.1) instead of the REST API,
+with byte-identical conversational behaviour — the swap is at the provider
+layer (`app/tools/booking/mcp_calcom.py::McpBookingProvider`), not the tool
+tier, so `check_availability`/`book_job` stay the exact native tools they
+always were; no tier-1 tool moved to MCP. `app/mcp/oauth.py` is the OAuth 2.1
+client (PKCE + Dynamic Client Registration + headless refresh);
+`scripts/authorize_calcom.py` is the one-time interactive grant per tenant.
+The **Step A0 spike ran live against the real hosted server** (not simulated)
+and both gates named in the plan are open: DCR is unauthenticated and
+returns a public client with no secret, and `grant_types_supported` includes
+`refresh_token` — see `app/mcp/oauth.py`'s module docstring for the full
+recorded exchange.
+
+**Live verification (2026-08-01) is done, against a real `hotel-mzv`-account
+grant on a scratch tenant (`hotel-mzv-mcp-test`), not just offline tests:**
+`authorize_calcom` completed a real interactive OAuth grant; a real
+`check_availability` call through the widget path (`/chat/session` + `/chat`)
+returned real Cal.com slots and rendered as a real `suggestions` event; a
+real booking went through `create_booking` end to end (`book_job` →
+`send_confirmation`, no `FALLBACK_LINE`); and that booking, pulled back from
+Cal.com's own `/v2/bookings` API and compared directly against an equivalent
+`"calcom"`-provider booking, matched on event type, duration, the
+`caller-<digits>@example.com` placeholder-email pattern, and metadata shape
+— **both previously-guessed tool schemas (`get_availability`,
+`create_booking`) are now confirmed, not assumed.** `cancel_booking` /
+`reschedule_booking` remain unverified (nothing calls them yet —
+`plans/phase10.md` item 5). A warm-state `check_availability` p50 came back
+effectively tied with the REST provider (~620ms both, comfortably inside the
+§13 600–800ms budget) — the one-time first-call cost (session handshake +
+OAuth token fetch, observed several seconds) is exactly what the per-tenant
+session cache exists to amortize away. One real gap this session surfaced
+and fixed: `app/main.py`'s `lifespan` closed pooled HTTP clients on shutdown
+but had no equivalent for cached MCP sessions — `aclose_calcom_mcp_sessions()`
+now runs alongside `close_shared_clients()`; without it, a process shutdown
+left a live `streamablehttp_client`/`ClientSession` pair for the garbage
+collector to tear down outside its owning task, observed live as
+"attempted to exit cancel scope in a different task" / "generator is already
+running" noise (harmless, but a real resource-cleanup gap, not cosmetic).
+
+**Phase 9 Part B (bot lifecycle) is code-complete and offline-tested — see
+`plans/phase9.md`.** An operator can now create, archive, restore and purge
+bots entirely from `/admin` — `scripts/onboard_tenant.py` is no longer the
+only creation path. `app/tenancy/models.py::TenantConfig.tenant_id` gained a
+`^[a-z0-9][a-z0-9-]{1,47}$` validator (mirroring `McpServerConfig`'s tool-name
+one) and `status` gained `"archived"`; `resolve_tenant_id`
+(`app/tenancy/loader.py`) refuses an archived tenant on every channel via the
+new `TenantArchivedError` (a `TenantNotFoundError` subclass, so every
+existing `except TenantNotFoundError` handler already covers it with no code
+change — `vapi_llm.py` needed one new `try/except` of its own since it never
+had one at all before this). `app/tenancy/admin.py` gained `create_tenant`
+(refuses a duplicate id, writes `"onboarding"` then the final status —
+matching `onboard_tenant.py`'s ordering), `set_tenant_status` (archive/
+restore, a pure status flip via `sync_tenant`, not `save_tenant` — no
+version/consent checks apply), and `purge_tenant` (FK-ordered deletes,
+refuses unless already archived, best-effort Vault/Vapi/JSON cleanup after).
+`0010_lifecycle.sql` adds the status constraint and a `delete_tenant_secrets`
+Vault RPC — deliberately **no** `grant delete ... to app_backend`; purge runs
+on the Supabase secret key like every other admin write, and that role
+already has `DELETE` via the project's own default-privilege grant (the
+usual "trap" documented below, here working in purge's favor). Five new
+bot templates live in `content/templates/*.json` (hotel, clinic, trades,
+salon, restaurant). The admin UI (`admin/src/views/NewTenant.tsx`, plus a
+Danger Zone at the bottom of `Config.tsx`) builds and serves correctly
+(verified: TypeScript compiles clean, the bundle serves the new UI text over
+HTTP) but has **not been visually clicked through in a real browser** — the
+Chrome extension wasn't connected this session, so this is confirmed by
+build + route tests (42 of them, `tests/test_admin_tenant_crud.py`), not by
+eyes on the actual rendered page. Worth a real click-through before calling
+Part B fully done. `_PURGE_TABLES` covers the current schema only
+(`chat_messages` → `chat_sessions` → `escalations` → `messages` → `jobs` →
+`calls` → `services` → `mcp_servers` → `voice_consents` → `tenants`) —
+Part C's `knowledge_chunks`/`knowledge_documents` don't exist yet and will
+need adding to the front of that list when they do — **done** as part of
+Part C's own migration, see below.
+
+**`0010_lifecycle.sql` is now live-verified (2026-08-02), not just
+offline-tested.** It sat unapplied against the real Supabase project through
+this whole write-up above — `tenants_status_check` still only allowed
+`active`/`paused`/`onboarding`, so any real `set_tenant_status(...,
+"archived")` call 400'd on the CHECK constraint, invisible until something
+actually tried to archive a tenant against the live database. Caught doing
+exactly that: an attempt to archive the `hotel-mzv-mcp-test` scratch tenant
+(the Part A live-verification leftover, see `scripts/authorize_calcom.py`'s
+section above) for cleanup. Applied via the same one-off `psycopg` /
+`DATABASE_URL` approach Step 10 used for `0001`-`0009`; confirmed live
+afterward (`tenants_status_check` now includes `'archived'`) — and then the
+scratch tenant itself was actually archived and purged through the real
+`set_tenant_status` → `purge_tenant` path, the first live proof either
+function works end to end, not just against `mock_http`.
+
+**Phase 9 Part C (per-bot RAG knowledge base) is code-complete and
+offline-tested — see `plans/phase9.md`.** An operator can give any bot a
+document corpus from `/admin`'s new Knowledge tab (paste text, upload a
+file, or crawl a URL) that `search_knowledge` retrieves from mid-turn.
+
+- **`search_knowledge` is the first *conditionally bound* native tool in
+  this codebase.** Every other native tool (`check_availability`, `book_job`,
+  `send_confirmation`, `escalate`, `is_emergency`) is bound to every tenant
+  unconditionally; `native_tools_for` (`app/tools/registry.py`) — a function
+  that has been a no-op pass-through since Phase 1 — now appends
+  `search_knowledge` only when `tenant.knowledge.enabled` is true, gated a
+  layer above by `settings.knowledge_enabled` (`KNOWLEDGE_ENABLED`, off by
+  default). Correctness rests on the same guarantee MCP tools established in
+  Phase 6: `reason` (binds) and the dynamic `tools` node (executes) both call
+  this one function, so there is no second list to fall out of sync —
+  `tests/test_knowledge_tool.py`'s real proof of this is a full graph turn
+  that both binds and executes the tool successfully, not a static
+  comparison of two lists (a static comparison can't actually distinguish
+  "both sites agree" from "both sites happen to agree today").
+- **Two independent switches, not one.** `KNOWLEDGE_ENABLED` gates the
+  feature repo-wide (admin routes + whether the tool can ever be bound for
+  anyone); a tenant's own `knowledge.enabled` (`KnowledgeSettings`,
+  `app/tenancy/models.py`) turns it on for that tenant specifically. Both
+  must be true.
+- **Storage is Supabase-only, no dev-mode JSON equivalent.** Unlike every
+  other piece of tenant content in this repo, knowledge documents/chunks
+  have no `content/tenants/<id>.json` counterpart and no in-memory-only dev
+  path beyond `InMemoryStore` (tests only) — `knowledge_source: "supabase"`
+  is declared as a `Literal` with one value specifically so a future
+  Qdrant/Pinecone swap is an obvious seam (`app/db/store.py::KnowledgeStore`)
+  rather than a silent default no one notices.
+- **`0011_knowledge.sql` is the first migration to grant `app_backend`
+  direct CRUD on tenant-owned rows**, not just the RLS-scoped access every
+  other table gets — documented at length in the migration itself as a
+  deliberate, narrow exception: a tenant deleting its own uploaded document
+  is ordinary tenant-scoped CRUD (still fully RLS-bounded), unlike
+  `purge_tenant`'s cross-table admin action. `match_knowledge_chunks` is a
+  `security invoker` SQL function (implicit — `language sql` functions are
+  invoker by default, unlike the analytics views which needed it stated
+  explicitly) taking no `tenant_id` parameter at all; isolation comes
+  entirely from RLS on the two tables it joins, the same posture
+  `get_tenant_secret`'s RPC established in Phase 4.
+- **A real gap this step's own scope surfaced and fixed, not a hypothetical
+  left for later:** `_PURGE_TABLES` (`app/tenancy/admin.py`) — Part B's own
+  list, written before these two tables existed, with a comment
+  anticipating exactly this — did not include `knowledge_chunks`/
+  `knowledge_documents`. The FK actually does cascade from `tenants` (so a
+  purge was never going to leave an orphaned row), but the per-table row
+  counts `purge_tenant` returns and logs for audit purposes would have
+  silently under-reported what a purge actually deleted. Fixed by adding
+  both to the front of the tuple (children before parents, matching the
+  existing convention); `tests/test_admin_tenant_crud.py`'s
+  `test_deletes_in_fk_order` / `test_a_failed_table_delete_raises_and_stops`
+  now assert the updated order.
+- **Chunking is pure Python, no tokenizer dependency** — `app/rag/chunking.py`
+  approximates token count as `len(text)//4`, prefers paragraph then sentence
+  then word boundaries, and keeps ~15% overlap between consecutive chunks
+  trimmed back to a word boundary. **Cosine similarity is pure Python too**
+  (`app/db/memory_store.py::_cosine_similarity`) — no numpy in the dependency
+  tree, so `InMemoryStore`'s search is a linear scan + sort, fine at test/dev
+  scale, replaced by pgvector's HNSW index (`0011_knowledge.sql`) in
+  production.
+- **Ingestion runs off the request path.** `app/rag/ingest.py` schedules
+  extraction → chunking → embedding → storage via `asyncio.create_task`
+  (matching the chat-transcript-write pattern from Phase 5) for text/URL
+  ingestion, and `asyncio.to_thread` specifically around the CPU-bound
+  PDF/DOCX extraction step — this app is single-worker/single-replica
+  (documented below), so a synchronous multi-second extraction on the event
+  loop would stall every other tenant's live conversation, not just the one
+  uploading.
+- **`app/rag/crawl.py` resolves and re-validates the target IP, not just the
+  hostname**, rejecting private/loopback/link-local/reserved/multicast
+  addresses — re-checked after every redirect, since a same-origin-looking
+  URL can 302 into `169.254.169.254` or a Docker-internal address. This is
+  the same SSRF concern `plans/phase10.md` item 12 already named for
+  tenant-submitted MCP URLs, addressed here for tenant-submitted crawl URLs
+  first because Part C shipped first.
+- **Re-indexing is scoped to URL-sourced documents only, on purpose.**
+  Pasted text and uploaded files are never persisted past their chunks being
+  embedded — there's no raw source to re-chunk from — so the admin route
+  409s for text/file documents naming the limitation, rather than pretending
+  to support something it can't actually do. Only a crawled URL can be
+  freshly re-fetched from `source_ref`.
+- **Embeddings are unverified against a live account** — same honesty
+  caveat class as Part A's initially-guessed Cal.com MCP tool schemas
+  (which later turned out correct once live-verified). `app/rag/embeddings.py`
+  implements Gemini's `batchEmbedContents` request/response shape and
+  per-request `outputDimensionality` truncation per its documented contract,
+  reusing the same real `GOOGLE_API_BASE`
+  (`https://generativelanguage.googleapis.com/v1beta`) `scripts/check_model.py`
+  already hardcodes — but this repo has not yet made a real embedding call.
+  A shape mismatch would surface as a loud `EmbeddingError` on every
+  ingestion (mapped to a document's `status="failed"`), never a silent wrong
+  answer — but "loud failure" is not the same as "verified correct," and a
+  live pass (a real upload through `/admin`, confirming `status: "ready"`
+  and a real `search_knowledge` retrieval end to end) is still owed before
+  trusting this with a real client's documents.
+- **58 tests offline** (19 in `test_knowledge_store.py`, 11 in
+  `test_rag_chunking.py`, 14 in `test_rag_extract.py`, 11 in
+  `test_knowledge_tool.py`, 3 more in `test_api.py`'s `/health` coverage)
+  covering both `KnowledgeStore` implementations, chunking edge cases
+  (unicode, oversized paragraphs,
+  zero-overlap, an unsplittable oversized token), every `extract_text`
+  branch including malformed-file error paths, conditional binding on both
+  channels, and — the one the plan calls out by name — that bot A can never
+  retrieve bot B's chunks, proven at both the store layer and through the
+  tool directly. **Not yet done, and honestly still owed**: a real
+  `/admin` click-through in a browser (same Chrome-extension gap Part B
+  flagged), a live embedding call, and a real crawl against a live URL.
+
+**`0011_knowledge.sql` is now live-verified (2026-08-02)** — applied in the
+same pass as `0010_lifecycle.sql` above, against the real Supabase project.
+Confirmed directly against the live database, not just "the migration ran
+without erroring": `knowledge_documents`/`knowledge_chunks` exist with RLS
+both enabled and forced; `app_backend` holds exactly `select`/`insert`/
+`update`/`delete` on both (and, checked specifically, **not** `anon`/
+`authenticated` — the explicit revoke this migration's own header calls out
+as non-boilerplate actually took); the HNSW index on `knowledge_chunks`
+exists; `match_knowledge_chunks` and `delete_tenant_secrets` both exist as
+functions; both `pg_cron` sweep jobs are scheduled. What's still **not**
+live-verified: a real ingestion (paste/upload/crawl → embed → store) and a
+real `search_knowledge` retrieval through the running app — the schema is
+now real, the pipeline against it still isn't proven end to end.
+
 ## Gotchas learned the hard way
+- **The boot-time tenant snapshot needs its own timeout, not `supabase_timeout_seconds`.**
+  Found live during Phase 8 verification: `SupabaseTenantRepository.refresh()` shared the
+  8s request-shaped budget, and a cold process — whose first HTTPS call pays DNS + TLS to
+  `us-east-1` on top of the query — intermittently lost that race. The consequence is
+  silent and in the worst direction: the app boots **fine**, serves every tenant from the
+  baked-in `content/tenants/*.json` instead of Postgres, and keeps doing so until the next
+  background refresh (`TENANT_SNAPSHOT_REFRESH_SECONDS`, 300s). On Railway that is every
+  deploy, so a config edit made in `/admin` can look reverted for five minutes. Fixed with
+  a dedicated `TENANT_SNAPSHOT_TIMEOUT_SECONDS` (20s) **plus one retry on a transport error
+  only** — a 4xx/5xx is never retried, since a bad key or missing table can't be fixed by
+  trying again and would just double the boot delay. The query itself takes ~0.4s warm;
+  this is entirely about the cold first call. `/health`'s `problems[]` is the only signal
+  when it does happen — the fallback is deliberately silent to the caller.
+- **`str()` of an httpx timeout is the empty string.** The original snapshot failure logged
+  `"failed wholesale: "` and named nothing, which is why the above took a live repro to
+  diagnose at all. Log `type(exc).__name__` alongside `exc` anywhere an httpx error is
+  caught and reported, not just `%s`.
+- **Supabase's schema default privileges quietly re-grant everything in `public`.**
+  `0008_analytics.sql`'s header says its views are granted "to app_backend ONLY — never to
+  `authenticated`", and that is **not** what is live: `anon` and `authenticated` hold all
+  privileges on all five analytics views, because the project has
+  `ALTER DEFAULT PRIVILEGES ... GRANT ALL ON TABLES TO anon, authenticated, service_role`
+  and every newly created view inherits it. `revoke ... from public` (which the migration
+  does for the RPC) does **not** touch grants held by *named* roles. Isolation still holds
+  — verified live, the anon key reads zero rows — but only because `security_invoker=true`
+  pushes the base tables' RLS onto the caller. That means `security_invoker` is doing the
+  work **alone**, not as one layer of two; drop it from a view and there is nothing behind
+  it. Don't read the migration header as a description of the live grant state.
 - **Groq leaks tool calls into text.** Llama 3.3 sometimes writes
   `<function=name>{...}</function>` into the reply, and sometimes emits a call malformed
   enough that Groq rejects the whole request. Both are handled in `app/brain/sanitize.py`
@@ -757,3 +1016,50 @@ Supabase-Auth per-tenant login mini-plan went in beside it as item 14.
   JSON has no assistant id yet — `resolve_tenant_id`'s `find_by_assistant_id` misses
   silently, and the caller hears the greeting (spoken by TTS with no LLM round trip) and
   then silence on every subsequent turn, while `/health` stays green throughout.
+- **The Cal.com MCP OAuth grant lives entirely in Vault, keyed per tenant — there is no
+  shared fallback, unlike `CALCOM_API_KEY`.** `resolve_secret`'s "vault error is never
+  absent" rule (above) still applies, but `app/mcp/oauth.py::_load_credentials` has no
+  `env_value` to fall back to even on a genuine "no secret" result, because a shared
+  refresh token would mean every `mcp_calcom` tenant authorizes into the *same* Cal.com
+  account — the one design this layer exists to avoid. A tenant with no grant gets a
+  `CalcomOAuthError` naming the exact `authorize_calcom` command to fix it, every time,
+  not a silent cross-tenant leak.
+- **`McpBookingProvider`'s MCP session cache is module-level, like `shared_async_client`'s
+  client cache — not per-instance.** `get_booking_provider()` constructs a fresh
+  `McpBookingProvider()` on every tool call (same as `CalcomBookingProvider`), so caching
+  on `self` would cache nothing across calls. `app/tools/booking/mcp_calcom.py`'s
+  `_session_cache` dict is module-global for exactly this reason — don't "clean up" it
+  into an instance attribute.
+- **`build_connection`'s `None`-means-skip-and-warn contract had to survive gaining an
+  `auth: "oauth"` branch, because two callers need opposite behaviour from the same
+  failure.** The long-tail tenant path (`app/mcp/client.py::_build_connections`) must
+  degrade a bad server silently; the booking-critical path
+  (`app/tools/booking/mcp_calcom.py::_connection_for`) must fail loudly as a
+  `BookingError`. Rather than making `build_connection` raise for one caller and not the
+  other, `_build_oauth_connection` keeps the existing never-raises contract, and
+  `_connection_for` is the one that turns a `None` back into a `BookingError` — one
+  implementation, two callers, each gets the failure mode it needs.
+- **A tool argument shape this codebase could not verify offline, and had to be checked
+  against a real account: `get_availability` / `create_booking` on Cal.com's hosted MCP
+  server.** Cal.com's docs name the tools, not their parameters. Confirmed live
+  2026-08-01 (plan §9 live check 3) — the guessed field names (matching what the proven
+  REST provider already sends Cal.com's plain v2 API) turned out to be correct: a real
+  availability query and a real booking both succeeded, and the booking matched an
+  equivalent `"calcom"`-provider one when compared via Cal.com's own `/v2/bookings` API.
+  `cancel_booking` / `reschedule_booking` are still unverified the same way — nothing
+  calls them yet (`plans/phase10.md` item 5) — so don't assume they're equally safe.
+  Don't read the offline tests alone as proof either way for any of the four; they prove
+  the *provider's* logic (event-type resolution, error mapping, session caching), never
+  Cal.com's actual schema — only a live call can do that, which is why this class of gap
+  needed a real authorized grant to close, not just more unit tests.
+- **`app/main.py`'s `lifespan` needed a second shutdown hook, not just
+  `close_shared_clients()`.** Found live while latency-testing `McpBookingProvider`
+  outside the request cycle: its per-tenant session cache
+  (`app/tools/booking/mcp_calcom.py`) holds a live `streamablehttp_client` +
+  `ClientSession` pair open indefinitely — that's the whole point of the cache — and
+  nothing closed it on shutdown. Left alone, the interpreter tears the still-open async
+  generators down at GC/exit time instead, from *outside* the task that opened them —
+  observed live as "attempted to exit cancel scope in a different task" / "generator is
+  already running" noise. Harmless in that nothing corrupted, but a real resource leak on
+  every graceful shutdown, not cosmetic. Fixed by `aclose_calcom_mcp_sessions()`, called
+  in `lifespan` right after `close_shared_clients()` — same pattern, second cache.

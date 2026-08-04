@@ -12,8 +12,15 @@ from langchain_core.tools import BaseTool
 from app.tenancy.models import TenantConfig
 from app.tools.booking_tools import book_job, check_availability
 from app.tools.emergency_tools import is_emergency
+from app.tools.knowledge_tools import search_knowledge
 from app.tools.messaging_tools import escalate, send_confirmation
 
+#: The unconditional critical path — every tenant gets exactly these five,
+#: always. Deliberately NOT where `search_knowledge` lives (Phase 9 Part C):
+#: it's a sixth native tool, but a *conditional* one, bound only for tenants
+#: with a knowledge base — see `native_tools_for` below. Keeping this
+#: constant fixed at five is what keeps `test_critical_path_tools_are_all_native`
+#: (tests/test_native_tools.py) meaningful as a "these never change" guard.
 NATIVE_TOOLS: list[BaseTool] = [
     check_availability,
     book_job,
@@ -27,9 +34,13 @@ NATIVE_TOOLS_BY_NAME: dict[str, BaseTool] = {t.name: t for t in NATIVE_TOOLS}
 #: Tools that hit the network / a calendar and therefore must be preceded by a
 #: spoken acknowledgement rather than silence. `escalate` now does real
 #: network I/O (SMS, and on voice a live transfer) — dead air on the
-#: emergency path is the worst dead air there is.
+#: emergency path is the worst dead air there is. `search_knowledge` joins
+#: this list even though `is_slow_tool` below would already treat it as slow
+#: via the "anything not in the fixed five" fallback (the same mechanism
+#: that covers every MCP tool) — explicit here because it's a known,
+#: named tool, not an arbitrary long-tail one.
 SLOW_TOOLS: frozenset[str] = frozenset(
-    {"check_availability", "book_job", "send_confirmation", "escalate"}
+    {"check_availability", "book_job", "send_confirmation", "escalate", "search_knowledge"}
 )
 
 
@@ -37,10 +48,20 @@ def native_tools_for(tenant: TenantConfig, channel: str = "chat") -> list[BaseTo
     """The native tools this tenant may use on this channel.
 
     Kept as a function (not a constant) because Phase 4 tenants will enable
-    different subsets, and because voice and chat won't always agree.
+    different subsets, and because voice and chat won't always agree. Phase 9
+    Part C is the first tenant this seam actually branches on:
+    `search_knowledge` is appended only when `tenant.knowledge.enabled`, so a
+    bot with no knowledge base never carries its schema in the prompt. Called
+    from two places that must stay in agreement — `app/brain/nodes/reason.py`
+    (binds tools) and `app/brain/nodes/tools.py` (executes them) — putting the
+    branch here, in the one function both call, is what keeps them in sync
+    automatically rather than requiring two edits kept in sync by hand.
     """
-    del tenant, channel  # every tenant gets the full critical path in Phase 1
-    return list(NATIVE_TOOLS)
+    del channel  # every tenant gets the full critical path regardless of channel
+    tools = list(NATIVE_TOOLS)
+    if tenant.knowledge.enabled:
+        tools.append(search_knowledge)
+    return tools
 
 
 def is_slow_tool(name: str) -> bool:

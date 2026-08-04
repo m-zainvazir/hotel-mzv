@@ -17,6 +17,19 @@ class TenantNotFoundError(LookupError):
     """Raised when a tenant_id / phone number / widget key resolves to nothing."""
 
 
+class TenantArchivedError(TenantNotFoundError):
+    """Raised when a tenant resolves but is `status: "archived"` (Phase 9
+    Part B) — a soft-deleted bot must not answer on any channel.
+
+    Subclasses `TenantNotFoundError` deliberately: every existing
+    `except TenantNotFoundError` handler (`app/channels/chat.py`,
+    `app/channels/webhooks.py`) already refuses cleanly without any change —
+    from a caller's perspective "archived" and "doesn't exist" get the same
+    outward refusal, just a different log line at the point it's raised
+    (`app/tenancy/loader.py::resolve_tenant_id`).
+    """
+
+
 @runtime_checkable
 class TenantRepository(Protocol):
     def get(self, tenant_id: str) -> TenantConfig: ...

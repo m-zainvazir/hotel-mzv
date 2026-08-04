@@ -61,6 +61,13 @@ class Settings(BaseSettings):
     # --- Google Gemini (much higher free-tier limits than Groq) ------------
     google_api_key: str | None = None
     google_model: str = "gemini-2.5-flash-lite"
+    #: The chat model itself goes through `langchain-google-genai`, which
+    #: knows its own endpoint — this is only for `app/rag/embeddings.py`'s
+    #: raw httpx call (Phase 9 Part C), matching this project's "raw httpx,
+    #: no SDKs" precedent for everything that isn't the reasoning model
+    #: itself. Same value `scripts/check_model.py` already hardcodes as
+    #: GOOGLE_BASE — real, not a placeholder.
+    google_api_base: str = "https://generativelanguage.googleapis.com/v1beta"
 
     # --- tenancy -----------------------------------------------------------
     default_tenant_id: str = "hotel-mzv"
@@ -115,6 +122,42 @@ class Settings(BaseSettings):
     #: rather than a made-up one.
     booking_placeholder_email_domain: str = "example.com"
 
+    # --- booking: Cal.com over MCP (Phase 9 Part A) -------------------------
+    #: The official hosted Cal.com MCP server — streamable HTTP, OAuth 2.1
+    #: only (no API-key path). Confirmed live (Step A0 spike, 2026-08-01):
+    #: `/.well-known/oauth-protected-resource` and
+    #: `/.well-known/oauth-authorization-server` both resolve at this origin,
+    #: Dynamic Client Registration (RFC 7591) is open at `/oauth/register`
+    #: with no pre-shared credential, and `grant_types_supported` includes
+    #: `refresh_token` — everything headless in `app/mcp/oauth.py` depends on
+    #: that last one. `token_endpoint_auth_methods_supported: ["none"]` means
+    #: DCR returns a bare `client_id`, no secret — a public client using PKCE
+    #: (S256) is the whole story, not a fallback path.
+    calcom_mcp_url: str = "https://mcp.cal.com/mcp"
+    #: Per-tool-call ceiling once a session is open, mirroring
+    #: `calcom_timeout_seconds` — booking is synchronous the same way it is
+    #: through the REST provider.
+    calcom_mcp_timeout_seconds: float = 15.0
+    #: Bounds opening the streamable-HTTP session + `initialize()` only, kept
+    #: separate from the call timeout above for the same reason
+    #: `mcp_connect_timeout_seconds` is separate from `mcp_tool_timeout_seconds`.
+    calcom_mcp_connect_timeout_seconds: float = 10.0
+    #: How long a resolved access token is trusted before
+    #: `app/mcp/oauth.py::access_token_for` refreshes it again, checked
+    #: against the token response's own `expires_in` — this is a poll
+    #: interval against that real expiry, the same relationship
+    #: `app/db/auth.py::tenant_jwt`'s 60s cache has to its JWT's longer one.
+    calcom_oauth_token_cache_seconds: int = 60
+    #: `scripts/authorize_calcom.py`'s temporary localhost callback listener,
+    #: used once per tenant during the interactive authorization-code grant.
+    calcom_oauth_redirect_port: int = 8901
+    #: How long `McpBookingProvider` (app/tools/booking/mcp_calcom.py) keeps a
+    #: connected MCP session before reconnecting — a fresh streamable-HTTP
+    #: handshake per `check_availability` call would blow the §13 latency
+    #: budget, the same correctness-and-latency argument
+    #: `mcp_tool_cache_ttl_seconds` makes for the tenant long-tail tool list.
+    calcom_mcp_session_cache_ttl_seconds: float = 300.0
+
     # --- telephony: Twilio (Phase 3) ----------------------------------------
     twilio_account_sid: str | None = None
     twilio_auth_token: str | None = None
@@ -158,6 +201,17 @@ class Settings(BaseSettings):
     #: `sync_tenants.py` edit (bypassing the admin API) is ever picked up by
     #: a running server. 0 disables the background loop.
     tenant_snapshot_refresh_seconds: int = 300
+    #: Timeout for the boot-time tenant snapshot specifically — deliberately
+    #: NOT `supabase_timeout_seconds`. That one is shaped for per-request
+    #: business queries on the latency budget; this single query runs once at
+    #: boot, on a cold process whose very first HTTPS call also pays DNS + TLS
+    #: to a cross-continental region. Sharing the 8s request-shaped budget
+    #: made a cold boot intermittently time out and silently serve the baked-in
+    #: JSON fallback for up to `tenant_snapshot_refresh_seconds` — observed
+    #: live on a Railway-shaped cold start. Same reasoning `plans/phase4.md`
+    #: gave the Cartesia clone upload its own long timeout rather than reusing
+    #: the booking-shaped one.
+    tenant_snapshot_timeout_seconds: float = 20.0
     #: Supavisor SESSION-mode pooler URI (port 5432, not 6543) for the
     #: LangGraph Postgres checkpointer. Unset means `InMemorySaver` stays
     #: active. Never the direct `db.<ref>.supabase.co` host — it is IPv6-only.
@@ -240,6 +294,38 @@ class Settings(BaseSettings):
     #: Per-IP ceiling on /admin/api/*, generous relative to the chat limits
     #: since a single operator is the expected caller, not the public.
     admin_requests_per_minute: int = 120
+
+    # --- knowledge base / RAG (Phase 9 Part C) --------------------------------
+    #: Gates `search_knowledge` from ever being bound
+    #: (`app/tools/registry.py::native_tools_for`) and the admin knowledge
+    #: routes from doing real work — off by default so a deploy that hasn't
+    #: opted in pays nothing extra, the same posture `mcp_enabled` already
+    #: established for the long-tail tool tier.
+    knowledge_enabled: bool = False
+    #: Mirrors `llm_provider`'s shape. Only "google" is implemented today —
+    #: "openai" is declared so a later embeddings-provider swap is a config
+    #: flip, not a refactor (app/rag/embeddings.py dispatches on this).
+    embedding_provider: Literal["google", "openai"] = "google"
+    embedding_model: str = "gemini-embedding-001"
+    #: Gemini's embedding model supports Matryoshka truncation down from its
+    #: native 3072 dimensions — 768 keeps pgvector's HNSW index (0011_knowledge.sql)
+    #: small without a meaningful retrieval-quality hit at this corpus size.
+    embedding_dimensions: int = 768
+    #: Separate from `llm_timeout_seconds` — an embedding call batches many
+    #: chunks per request during ingestion, a different latency shape than a
+    #: single chat completion.
+    embedding_timeout_seconds: float = 20.0
+    #: Per-upload ceiling (`app/rag/ingest.py`), independent of
+    #: `knowledge.max_chunks` (`app/tenancy/models.py`) — this bounds one
+    #: file's raw bytes before extraction even runs; that one bounds the
+    #: tenant's total indexed corpus afterward.
+    knowledge_max_upload_bytes: int = 20 * 1024 * 1024
+    #: The one and only backend today — declared as a `Literal["supabase"]`
+    #: rather than a bare `str`, the same "swap seam, not a live switch yet"
+    #: shape `tenant_source`/`mcp_source` used before a second backend
+    #: existed. `app/db/store.py::KnowledgeStore` is the seam a future
+    #: Qdrant/Pinecone implementation would slot into.
+    knowledge_source: Literal["supabase"] = "supabase"
 
     # --- observability: LangSmith (Phase 7 Step 7) --------------------------
     #: These three were always in .env.example, but were never real Settings

@@ -78,6 +78,20 @@ def render_system_prompt(
             "Then call escalate immediately. Do not book, do not ask routine questions."
         )
 
+    # Empty for a tenant with no knowledge base (Phase 9 Part C) — the
+    # placeholder then contributes nothing but a blank line, deliberately
+    # not wrapped in its own always-visible section header the way
+    # ${safety_rules} is, since that guidance (unlike safety) is often
+    # absent entirely.
+    knowledge_rule = (
+        "You have a knowledge base for this business — call search_knowledge for "
+        "anything specific to it that isn't already covered above. Prefer what it "
+        "returns over guessing, and say so plainly when it comes back empty rather "
+        "than inventing an answer."
+        if tenant.knowledge.enabled
+        else ""
+    )
+
     template = (
         Template(tenant.system_prompt_override)
         if tenant.system_prompt_override
@@ -98,4 +112,5 @@ def render_system_prompt(
         services=services or "  (none configured)",
         length_rule=_VOICE_LENGTH if channel == "voice" else _CHAT_LENGTH,
         safety_rules=safety,
+        knowledge_rule=knowledge_rule,
     )

@@ -213,6 +213,27 @@ def test_health_is_ok_with_no_problems_by_default(client):
     assert body["problems"] == []
 
 
+def test_health_reports_knowledge_off_by_default(client):
+    """Phase 9 Part C — KNOWLEDGE_ENABLED defaults to false."""
+    assert client.get("/health").json()["knowledge"] == "off"
+
+
+def test_health_reports_knowledge_unavailable_when_enabled_with_no_supabase(client, monkeypatch):
+    monkeypatch.setenv("KNOWLEDGE_ENABLED", "true")
+    reset_settings_cache()
+    body = client.get("/health").json()
+    assert body["knowledge"] == "unavailable"
+    assert body["status"] == "degraded"
+    assert "knowledge is enabled but SUPABASE_URL is unset" in body["problems"]
+
+
+def test_health_reports_knowledge_ready_when_enabled_with_supabase(client, monkeypatch):
+    monkeypatch.setenv("KNOWLEDGE_ENABLED", "true")
+    monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
+    reset_settings_cache()
+    assert client.get("/health").json()["knowledge"] == "ready"
+
+
 def test_health_detail_is_open_when_no_api_auth_token_is_configured(client):
     """Dev default: no API_AUTH_TOKEN means every caller sees the detail
     (Phase 7 Step 4) — same fail-open-when-unconfigured convention as

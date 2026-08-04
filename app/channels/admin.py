@@ -23,12 +23,15 @@ exactly the kind of thing that gets copy-pasted wrong later.
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
+import secrets
 from datetime import date, datetime, timedelta
-from typing import Any
+from typing import Any, Literal
 
-from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query, status
-from pydantic import ValidationError
+from fastapi import APIRouter, Body, Depends, File, Header, HTTPException, Query, UploadFile, status
+from pydantic import BaseModel, ValidationError
 
 from app.brain.prompts.system import render_system_prompt
 from app.channels.admin_auth import (
@@ -38,13 +41,21 @@ from app.channels.admin_auth import (
     require_tenant_access,
 )
 from app.channels.ratelimit import enforce_admin_rate_limit
+from app.config import get_settings
 from app.db.factory import get_store
 from app.tenancy import admin as tenancy_admin
 from app.tenancy.loader import get_repository, get_tenant_config
 from app.tenancy.models import TenantConfig
 from app.tenancy.repository import TenantNotFoundError
+from app.tenancy.sync import TenantSyncError
 
 logger = logging.getLogger(__name__)
+
+#: Seeded from the two original tenants' shapes plus three new ones
+#: (Step B4) — content/templates/<name>.json, each a full TenantConfig
+#: with identity fields (phone_numbers, widget_keys, vapi, voice_id,
+#: event_type_id) left blank/null for the operator to fill in for real.
+_TEMPLATE_NAMES = frozenset({"hotel", "clinic", "trades", "salon", "restaurant"})
 
 router = APIRouter(
     prefix="/admin/api",
@@ -96,7 +107,18 @@ async def get_session(principal: AdminPrincipal = Depends(require_admin)) -> dic
 
 @router.get("/tenants")
 async def list_tenants(principal: AdminPrincipal = Depends(require_admin)) -> dict:
-    return {"tenant_ids": _accessible_tenant_ids(principal)}
+    ids = _accessible_tenant_ids(principal)
+    # `tenants` is additive, not a replacement for `tenant_ids` — cheap
+    # (repository reads only, no store/network I/O) and lets the sidebar
+    # (Phase 9 Part B) group archived bots without a second round trip.
+    tenants = []
+    for tenant_id in ids:
+        try:
+            config = get_tenant_config(tenant_id)
+            tenants.append({"tenant_id": tenant_id, "name": config.name, "status": config.status})
+        except TenantNotFoundError:
+            tenants.append({"tenant_id": tenant_id, "name": tenant_id, "status": "unknown"})
+    return {"tenant_ids": ids, "tenants": tenants}
 
 
 @router.get("/overview")
@@ -155,6 +177,17 @@ async def get_tenant(
 
 def _validation_errors(exc: ValidationError) -> list[dict]:
     return [{"loc": list(e["loc"]), "msg": e["msg"], "type": e["type"]} for e in exc.errors()]
+
+
+async def _tenant_detail(config: TenantConfig) -> dict:
+    """The response shape `get_tenant`/`put_tenant`/the Step B4 lifecycle
+    routes all return — factored out so a created/archived/restored tenant
+    renders in the panel exactly like any other GET would."""
+    body = config.model_dump(mode="json")
+    body["_health"] = _config_health(config)
+    body["_rendered_system_prompt"] = render_system_prompt(config, channel="chat")
+    body["_version"] = await tenancy_admin.get_tenant_version(config.tenant_id)
+    return body
 
 
 @router.put("/tenants/{tenant_id}")
@@ -216,6 +249,388 @@ async def put_tenant(
     body["_rendered_system_prompt"] = render_system_prompt(saved, channel="chat")
     body["_version"] = await tenancy_admin.get_tenant_version(tenant_id)
     return body
+
+
+# --- bot lifecycle (Phase 9 Part B) -----------------------------------------
+
+
+class CreateTenantRequest(BaseModel):
+    """The panel's minimal "+ New bot" form — everything else on
+    `TenantConfig` gets Pydantic's own defaults (blank mode) or the chosen
+    template's/source tenant's values (template/clone mode). An operator
+    fine-tunes the rest afterward through the normal `PUT` editor."""
+
+    mode: Literal["blank", "template", "clone"]
+    template: str | None = None
+    source_tenant_id: str | None = None
+    tenant_id: str
+    name: str
+    trade: str
+    greeting: str
+    escalation_phone: str
+
+
+class PurgeTenantRequest(BaseModel):
+    #: Typed confirmation — must equal the path's tenant_id. Plan §9 Risk 5:
+    #: purge is the most destructive operation in the codebase, so this is a
+    #: deliberate second keystroke, not just a "are you sure?" click.
+    tenant_id: str
+
+
+def _load_template(name: str) -> dict[str, Any]:
+    if name not in _TEMPLATE_NAMES:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=f"unknown template {name!r} — choose one of {sorted(_TEMPLATE_NAMES)}",
+        )
+    path = get_settings().content_dir / "templates" / f"{name}.json"
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _clone_base(source_tenant_id: str) -> dict[str, Any]:
+    """The source tenant's full config, with everything account-specific
+    cleared — plan §9 Step B4's exact list: `tenant_id` (overwritten by the
+    caller below regardless), `phone_numbers`, `widget_keys`,
+    `vapi.assistant_id`, `voice.voice_id`, `booking.event_type_id`."""
+    try:
+        source = get_tenant_config(source_tenant_id)
+    except TenantNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=f"unknown source_tenant_id {source_tenant_id!r}",
+        ) from exc
+    base = source.model_dump(mode="json")
+    base["phone_numbers"] = []
+    base["widget_keys"] = []
+    base["vapi"] = {**base["vapi"], "assistant_id": None}
+    base["voice"] = {**base["voice"], "voice_id": None}
+    base["booking"] = {**base["booking"], "event_type_id": None}
+    return base
+
+
+def _generate_widget_key() -> str:
+    return f"pk_widget_{secrets.token_hex(12)}"
+
+
+@router.post("/tenants", status_code=status.HTTP_201_CREATED)
+async def create_tenant_route(
+    payload: CreateTenantRequest, principal: AdminPrincipal = Depends(require_admin)
+) -> dict:
+    """Create a bot from blank, a template, or a clone of an existing one.
+
+    Operator-only (unlike every tenant-scoped route below, this can't use
+    `require_tenant_access` — there's no existing tenant to scope access to
+    yet), so this behaves correctly the day tenant login lands with no
+    re-audit, matching every other operator-only path in this module.
+    """
+    if principal.kind != "operator":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="only an operator principal may create a tenant",
+        )
+
+    if payload.mode == "template":
+        if not payload.template:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="template is required when mode='template'",
+            )
+        base = _load_template(payload.template)
+    elif payload.mode == "clone":
+        if not payload.source_tenant_id:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="source_tenant_id is required when mode='clone'",
+            )
+        base = _clone_base(payload.source_tenant_id)
+    else:
+        base = {}
+
+    # Emergency is merged one level deeper than everything else here — a
+    # blind top-level overwrite (matching put_tenant's own shallow-merge
+    # convention) would drop a template's/source's own danger keywords and
+    # holding message, keeping only the operator-supplied escalation_phone.
+    merged = {
+        **base,
+        "tenant_id": payload.tenant_id,
+        "name": payload.name,
+        "trade": payload.trade,
+        "greeting": payload.greeting,
+        "emergency": {
+            **(base.get("emergency") or {}),
+            "escalation_phone": payload.escalation_phone,
+        },
+        "widget_keys": [_generate_widget_key()],
+        "status": "active",
+    }
+    try:
+        proposed = TenantConfig.model_validate(merged)
+    except ValidationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=_validation_errors(exc),
+        ) from exc
+
+    try:
+        saved = await tenancy_admin.create_tenant(proposed)
+    except tenancy_admin.TenantAlreadyExistsError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except TenantSyncError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+
+    return await _tenant_detail(saved)
+
+
+@router.post("/tenants/{tenant_id}/archive")
+async def archive_tenant(
+    tenant_id: str, principal: AdminPrincipal = Depends(require_tenant_access)
+) -> dict:
+    try:
+        updated = await tenancy_admin.set_tenant_status(tenant_id, "archived")
+    except TenantNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    return await _tenant_detail(updated)
+
+
+@router.post("/tenants/{tenant_id}/restore")
+async def restore_tenant(
+    tenant_id: str, principal: AdminPrincipal = Depends(require_tenant_access)
+) -> dict:
+    try:
+        updated = await tenancy_admin.set_tenant_status(tenant_id, "active")
+    except TenantNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    return await _tenant_detail(updated)
+
+
+@router.post("/tenants/{tenant_id}/purge")
+async def purge_tenant_route(
+    tenant_id: str,
+    payload: PurgeTenantRequest = Body(...),
+    principal: AdminPrincipal = Depends(require_admin),
+) -> dict:
+    """Irreversible. Operator-only (same reasoning as create), refuses
+    unless the typed confirmation in the body matches the path's tenant_id,
+    and delegates the archived-status precondition + FK-ordered deletes to
+    `app/tenancy/admin.py::purge_tenant` — see that function's docstring for
+    the full order and what's best-effort vs. what aborts."""
+    if principal.kind != "operator":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="only an operator principal may purge a tenant",
+        )
+    if payload.tenant_id != tenant_id:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="confirmation tenant_id does not match — type the exact tenant id to confirm",
+        )
+
+    try:
+        counts = await tenancy_admin.purge_tenant(tenant_id)
+    except TenantNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except tenancy_admin.TenantNotArchivedError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except tenancy_admin.TenantPurgeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)
+        ) from exc
+
+    logger.info("tenant %s purged by operator: %s", tenant_id, counts)
+    return {"tenant_id": tenant_id, "deleted": counts}
+
+
+# --- knowledge base / RAG (Phase 9 Part C) ----------------------------------
+
+
+def require_knowledge_enabled() -> None:
+    """Mirrors `require_admin_enabled` — `KNOWLEDGE_ENABLED=false` (the
+    default) means every route below 404s before doing any real work,
+    indistinguishable from the routes never having existed."""
+    if not get_settings().knowledge_enabled:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not found")
+
+
+class KnowledgeTextRequest(BaseModel):
+    title: str = ""
+    text: str
+
+
+class KnowledgeUrlRequest(BaseModel):
+    url: str
+    crawl: bool = False
+    max_pages: int = 20
+    max_depth: int = 2
+
+
+class KnowledgeSearchRequest(BaseModel):
+    query: str
+
+
+@router.get("/tenants/{tenant_id}/knowledge")
+async def list_knowledge(
+    tenant_id: str,
+    principal: AdminPrincipal = Depends(require_tenant_access),
+    _enabled: None = Depends(require_knowledge_enabled),
+) -> dict:
+    documents = await get_store().alist_documents(tenant_id)
+    return {"documents": [d.model_dump(mode="json") for d in documents]}
+
+
+@router.post("/tenants/{tenant_id}/knowledge/text")
+async def add_knowledge_text(
+    tenant_id: str,
+    payload: KnowledgeTextRequest,
+    principal: AdminPrincipal = Depends(require_tenant_access),
+    _enabled: None = Depends(require_knowledge_enabled),
+) -> dict:
+    from app.rag.ingest import start_ingestion_from_text
+
+    if not payload.text.strip():
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="text must not be empty"
+        )
+    tenant = get_tenant_config(tenant_id)
+    document = await start_ingestion_from_text(
+        get_store(), tenant, title=payload.title, text=payload.text
+    )
+    return document.model_dump(mode="json")
+
+
+@router.post("/tenants/{tenant_id}/knowledge/upload")
+async def upload_knowledge_files(
+    tenant_id: str,
+    files: list[UploadFile] = File(...),
+    principal: AdminPrincipal = Depends(require_tenant_access),
+    _enabled: None = Depends(require_knowledge_enabled),
+) -> dict:
+    """Multiple files, each queued independently — one bad file must never
+    block the others (same "one failure degrades, never the whole batch"
+    posture `app/mcp/client.py` already established for MCP servers)."""
+    from app.rag.ingest import start_ingestion_from_file
+
+    tenant = get_tenant_config(tenant_id)
+    settings = get_settings()
+    store = get_store()
+    results = []
+    for file in files:
+        data = await file.read()
+        if len(data) > settings.knowledge_max_upload_bytes:
+            results.append(
+                {
+                    "title": file.filename,
+                    "status": "failed",
+                    "error": f"exceeds the {settings.knowledge_max_upload_bytes}-byte upload limit",
+                }
+            )
+            continue
+        document = await start_ingestion_from_file(
+            store, tenant, filename=file.filename or "upload", data=data
+        )
+        results.append(document.model_dump(mode="json"))
+    return {"documents": results}
+
+
+@router.post("/tenants/{tenant_id}/knowledge/url")
+async def add_knowledge_url(
+    tenant_id: str,
+    payload: KnowledgeUrlRequest,
+    principal: AdminPrincipal = Depends(require_tenant_access),
+    _enabled: None = Depends(require_knowledge_enabled),
+) -> dict:
+    from app.rag.ingest import start_ingestion_from_url
+
+    tenant = get_tenant_config(tenant_id)
+    documents = await start_ingestion_from_url(
+        get_store(),
+        tenant,
+        url=payload.url,
+        crawl=payload.crawl,
+        max_pages=payload.max_pages,
+        max_depth=payload.max_depth,
+    )
+    return {"documents": [d.model_dump(mode="json") for d in documents]}
+
+
+@router.post("/tenants/{tenant_id}/knowledge/{document_id}/reindex")
+async def reindex_knowledge_document(
+    tenant_id: str,
+    document_id: str,
+    principal: AdminPrincipal = Depends(require_tenant_access),
+    _enabled: None = Depends(require_knowledge_enabled),
+) -> dict:
+    """Only a `source_type == "url"` document can be re-indexed — the raw
+    source is never persisted for a pasted-text or uploaded-file document
+    (only its already-chunked, already-embedded content is), so those need
+    a fresh paste/upload instead, exactly like a brand-new document."""
+    import httpx
+
+    from app.rag.crawl import CrawlError, fetch_page
+    from app.rag.ingest import ingest_text
+
+    store = get_store()
+    document = await store.aget_document(tenant_id, document_id)
+    if document is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=f"no knowledge document {document_id!r}"
+        )
+    if document.source_type != "url" or not document.source_ref:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="only a URL-sourced document can be re-indexed — re-paste or re-upload instead",
+        )
+
+    tenant = get_tenant_config(tenant_id)
+    try:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=15.0) as client:
+            page = await fetch_page(client, document.source_ref)
+    except CrawlError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+
+    asyncio.create_task(ingest_text(store, tenant, document, page.text))
+    return document.model_dump(mode="json")
+
+
+@router.post("/tenants/{tenant_id}/knowledge/{document_id}/delete")
+async def delete_knowledge_document(
+    tenant_id: str,
+    document_id: str,
+    principal: AdminPrincipal = Depends(require_tenant_access),
+    _enabled: None = Depends(require_knowledge_enabled),
+) -> dict:
+    await get_store().adelete_document(tenant_id, document_id)
+    return {"deleted": document_id}
+
+
+@router.post("/tenants/{tenant_id}/knowledge/search")
+async def search_knowledge_preview(
+    tenant_id: str,
+    payload: KnowledgeSearchRequest,
+    principal: AdminPrincipal = Depends(require_tenant_access),
+    _enabled: None = Depends(require_knowledge_enabled),
+) -> dict:
+    """What the bot would actually retrieve for this question, before it
+    goes live — the same `search_chunks` call `app/tools/knowledge_tools.py`
+    makes at conversation time, using this tenant's own `top_k`/
+    `min_similarity` (`TenantConfig.knowledge`)."""
+    from app.rag.embeddings import EmbeddingError, embed_text
+
+    tenant = get_tenant_config(tenant_id)
+    try:
+        query_embedding = await embed_text(payload.query)
+    except EmbeddingError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+
+    if not query_embedding:
+        return {"hits": []}
+
+    hits = await get_store().asearch_chunks(
+        tenant_id,
+        query_embedding=query_embedding,
+        top_k=tenant.knowledge.top_k,
+        min_similarity=tenant.knowledge.min_similarity,
+    )
+    return {"hits": [h.model_dump(mode="json") for h in hits]}
 
 
 @router.get("/tenants/{tenant_id}/metrics")

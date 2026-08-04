@@ -29,8 +29,10 @@ COPY scripts ./scripts
 # (Phase 6). `google` — matches this project's current LLM_PROVIDER; if that
 # ever changes to `openai`, add the `openai` extra here too. Both `google`
 # and `openai` are safe to install unconditionally if you'd rather not track
-# this, at the cost of a slightly larger image.
-RUN pip install --upgrade pip && pip install ".[postgres,mcp,google]"
+# this, at the cost of a slightly larger image. `rag` — per-bot knowledge
+# base PDF/DOCX extraction (Phase 9 Part C); harmless to install even for a
+# deploy with KNOWLEDGE_ENABLED=false.
+RUN pip install --upgrade pip && pip install ".[postgres,mcp,google,rag]"
 
 
 FROM python:3.12-slim AS runtime

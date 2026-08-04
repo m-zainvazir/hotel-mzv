@@ -61,6 +61,7 @@ src/
     BarChart.tsx  inline SVG, no dependency
   views/
     Overview.tsx           tenant list + headline metrics
+    NewTenant.tsx           "+ New bot" — blank / template / clone (Phase 9 Part B)
     TenantView.tsx         per-tenant tab shell
     Metrics.tsx            tiles + daily charts
     Config.tsx             the tenant config editor — see below
@@ -90,6 +91,15 @@ matching input. A 409 means either a stale version (someone else saved
 first — the config is silently reloaded to the current version) or a missing
 voice consent (surfaced as the server's own actionable message, which names
 the exact `onboard_tenant` command to run).
+
+**The Danger Zone** (bottom of `Config.tsx`, operator-only, Phase 9 Part B)
+is Archive/Restore/Purge — a thin client over `POST /admin/api/tenants/
+{id}/archive`, `.../restore`, `.../purge`. Purge is disabled until the
+tenant's own `status` is `"archived"`, and again until the operator types
+the exact tenant id into a confirm field (`app/channels/admin.py` checks
+the same match server-side — the client-side disable is convenience, not
+the actual guard). See `infra/README.md`'s "Removing a bot" section for
+what purge actually deletes and in what order.
 
 ## The "AI Prompt" tab (`views/SystemPrompt.tsx`)
 

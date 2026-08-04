@@ -21,7 +21,8 @@ from app.brain.runner import stream_turn
 from app.config import get_settings
 from app.db.factory import get_store
 from app.logging_config import configure_logging, force_utf8_console
-from app.tenancy.loader import get_tenant_config, resolve_tenant_id
+from app.tenancy.loader import get_repository, get_tenant_config, resolve_tenant_id, set_repository
+from app.tenancy.supabase_repository import SupabaseTenantRepository
 from app.tools.formatting import speakable_datetime
 
 console = Console()
@@ -53,7 +54,19 @@ async def _print_jobs(tenant_id: str) -> None:
         console.print(f"  [dim]sms → {message.to}: {message.body}[/dim]")
 
 
+async def _init_repository() -> None:
+    """Mirror app/main.py's lifespan: without this, a panel-created tenant
+    (Supabase-only, no content/tenants/<id>.json — Phase 9 Part B) is
+    invisible here regardless of TENANT_SOURCE, since get_tenant_config
+    otherwise defaults to the JSON-file repository unconditionally."""
+    if get_settings().tenant_source == "supabase":
+        repo = SupabaseTenantRepository(fallback=get_repository())
+        await repo.refresh()
+        set_repository(repo)
+
+
 async def converse(args: argparse.Namespace) -> None:
+    await _init_repository()
     tenant_id = resolve_tenant_id(tenant_id=args.tenant)
     tenant = get_tenant_config(tenant_id)
     session_id = args.session or f"cli-{uuid.uuid4().hex[:6]}"

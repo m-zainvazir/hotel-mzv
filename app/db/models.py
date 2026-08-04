@@ -174,6 +174,54 @@ class DailyMetrics(BaseModel):
     chat_messages: int = 0
 
 
+class KnowledgeDocument(BaseModel):
+    """One uploaded/pasted/crawled source (Phase 9 Part C) — the parent row
+    a document's chunks hang off of. `status` tracks the background
+    ingestion pipeline (`app/rag/ingest.py`): pending -> indexing ->
+    ready|failed."""
+
+    id: str = Field(default_factory=lambda: _new_id("kdoc"))
+    tenant_id: str
+    title: str = ""
+    source_type: Literal["text", "file", "url"] = "text"
+    #: The filename, URL, or a short label for a pasted block — display
+    #: only, never re-fetched from this field.
+    source_ref: str = ""
+    status: Literal["pending", "indexing", "ready", "failed"] = "pending"
+    error: str | None = None
+    chunk_count: int = 0
+    bytes: int = 0
+    created_at: datetime = Field(default_factory=_utcnow)
+    indexed_at: datetime | None = None
+
+
+class KnowledgeChunk(BaseModel):
+    """One embedded slice of a `KnowledgeDocument`. `embedding` is `None`
+    until `app/rag/ingest.py` fills it in — a chunk can exist (and be
+    displayed as "indexing") before its vector does."""
+
+    id: str = Field(default_factory=lambda: _new_id("kchunk"))
+    tenant_id: str
+    document_id: str
+    ordinal: int = 0
+    content: str = ""
+    token_count: int = 0
+    embedding: list[float] | None = None
+    created_at: datetime = Field(default_factory=_utcnow)
+
+
+class KnowledgeHit(BaseModel):
+    """One `search_knowledge` / search-preview result — a chunk plus its
+    similarity score and its parent document's title, so a caller never
+    needs a second round trip just to attribute a quote to its source."""
+
+    chunk_id: str
+    document_id: str
+    document_title: str
+    content: str
+    similarity: float
+
+
 class CallSummary(BaseModel):
     """`Call` minus `transcript`/`recording_url` — the list-shaped analytics
     surface is PII-free *by construction*, not by convention: on

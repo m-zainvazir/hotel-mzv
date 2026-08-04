@@ -181,6 +181,61 @@ keep a tenant on SMS-alert-only instead of a live transfer. Either way,
 re-run `provision_vapi` after changing the number — Vapi only transfers to
 numbers declared at provisioning time.
 
+## Booking via MCP instead of REST (Phase 9 Part A)
+
+`booking.provider: "calcom"` talks to Cal.com's REST API directly
+(`app/tools/booking/calcom.py`). `booking.provider: "mcp_calcom"` is the same
+booking behaviour reached through Cal.com's **official hosted MCP server**
+(`https://mcp.cal.com`) instead — same event type resolution, same
+placeholder email, same error handling, same local `jobs` row staying
+authoritative. Nothing about what the bot says or does changes; only the
+transport underneath `check_availability` / `book_job` does. See
+`app/tools/booking/mcp_calcom.py`'s module docstring for exactly what's
+reused verbatim from the REST provider.
+
+Unlike the long-tail MCP servers below, this is **not** something you add to
+a tenant's `mcp_servers` array — `booking.provider` is the whole switch, and
+Cal.com is never exposed to the model as a callable tool (plan §9 explains
+why: the widget's slot chips, the booking-specific acknowledgement line, and
+`send_confirmation`'s job lookup all depend on the provider-layer boundary
+staying where it is).
+
+**One-time setup per tenant**, because Cal.com's hosted MCP server is OAuth
+2.1 only — no static API key path exists for it:
+
+```
+python -m scripts.authorize_calcom --tenant hotel-mzv
+```
+
+This opens a browser, walks a normal Cal.com login + consent screen for
+**that tenant's own account**, and stores the resulting refresh token +
+OAuth client credentials in Supabase Vault, scoped to that tenant
+(`calcom_mcp_refresh_token` / `calcom_mcp_client_id` / `calcom_mcp_client_secret`).
+Needs `SUPABASE_URL` + `SUPABASE_SECRET_KEY` in `.env`, same as
+`onboard_tenant`. Nothing else runs it again unless the grant is revoked —
+`app/mcp/oauth.py::access_token_for` refreshes headlessly from here on,
+called by `McpBookingProvider` on every turn.
+
+Then flip the provider — same JSON shape `booking.event_type_id` already
+uses, just a different `provider` string:
+
+```jsonc
+"booking": {
+  "provider": "mcp_calcom",      // was "calcom"
+  "event_type_id": 6446177,      // unchanged — Cal.com still needs this
+  ...
+}
+```
+
+**Cal.com still owns availability either way** — the same "hours/lead-time
+become prompt copy only" rule the plain `"calcom"` section above describes
+applies identically here; the MCP hop doesn't change what governs the real
+schedule.
+
+Reverting a tenant is the same one-word JSON edit back to `"calcom"` —
+`app/tools/booking/calcom.py` is untouched by any of this and stays the
+fallback.
+
 ## Connecting any remote MCP server (Phase 6)
 
 Set `MCP_ENABLED=true` in `.env` first — off by default, so this costs
@@ -239,3 +294,71 @@ python -m scripts.register_mcp_server --tenant hotel-mzv --name tavily --disable
 **No native tool ever moves to MCP.** `check_availability`, `book_job`,
 `send_confirmation`, `escalate` and `is_emergency` stay built-in and typed —
 MCP is for everything else a business wants to plug in.
+
+## Giving a bot a knowledge base (Phase 9 Part C)
+
+`/admin` → a tenant → the **Knowledge** tab — paste text, upload a file
+(`.txt`/`.md`/`.csv`/`.pdf`/`.docx`/`.html`), or crawl a URL. Each becomes a
+`knowledge_documents` row that's chunked, embedded, and stored as
+`knowledge_chunks` in the background (`app/rag/ingest.py`); the tab polls
+every few seconds while a document is `pending`/`indexing` and shows
+`ready` or `failed` (with the error) once it settles. A **Search preview**
+box on the same tab runs the exact same retrieval `search_knowledge` uses,
+so you can sanity-check what the bot would actually find before trusting it
+live.
+
+**Nothing about this is in a tenant's JSON file** — unlike everything else
+in this document, knowledge documents/chunks live only in Supabase
+(`knowledge_source: "supabase"`, the only backend that exists), so
+`sync_tenants`/`--export` never touches them and there's no dev-mode
+`TENANT_SOURCE=json` equivalent to fall back to.
+
+**Off by default, two switches, not one:**
+- `KNOWLEDGE_ENABLED=true` in `.env` gates the admin routes *and* whether
+  `search_knowledge` can ever be bound to any tenant, repo-wide.
+- `"knowledge": {"enabled": true}` in the tenant's JSON (or the Supabase
+  `tenants` row, once `TENANT_SOURCE=supabase`) turns it on for *that*
+  tenant specifically — `search_knowledge` is a **conditionally bound**
+  native tool, the first one in this codebase; every other native tool is
+  bound to every tenant unconditionally.
+
+Needs `GOOGLE_API_KEY` set (embeddings call Gemini's REST API directly,
+independent of whatever `LLM_PROVIDER` the reasoning model itself uses) —
+see `.env.example`'s knowledge section for the rest of the tuning knobs
+(`top_k`, `min_similarity`, `max_upload_bytes`).
+
+**Re-indexing only works for a URL-sourced document.** Pasted text and
+uploaded files aren't kept anywhere after their chunks are embedded, so
+there's nothing to re-chunk from — re-paste or re-upload instead. A crawled
+URL can always be re-fetched from `source_ref`, so its Reindex button
+re-crawls, re-chunks, and replaces its chunks in place.
+
+If the bot answers "nothing on file about that" for something you know you
+uploaded: check the document's status on the Knowledge tab first (a
+`failed` document contributes nothing), then the Search preview box (a
+retrieval near, but under, `min_similarity` shows up there as "no results"
+just like it would in a live conversation — lowering `min_similarity` a
+little is the fix, not re-uploading).
+
+## Creating and removing a bot (Phase 9 Part B)
+
+**Creating one no longer needs a dev box.** `/admin` → "+ New bot" — blank,
+from a template (`content/templates/hotel.json` / `clinic.json` /
+`trades.json` / `salon.json` / `restaurant.json`), or cloned from an
+existing tenant (identity fields — phone numbers, widget key, Vapi
+assistant, voice, Cal.com event type — are cleared, everything else
+carries over). **A panel-created bot lives in Supabase only — it has no
+`content/tenants/<id>.json` counterpart**, since Railway's filesystem is
+ephemeral and writing there from the running container would be
+misleading, not helpful. Run `python -m scripts.sync_tenants --export`
+afterward if you want it committed as a JSON seed/fallback too (see "Which
+one is actually 'true'" above for why that matters: without it, a bad edit
+that fails Supabase-side validation has nothing to fall back to).
+
+**Removing one is archive-first, purge-separately** — see
+`infra/README.md`'s "Removing a bot" section for the full FK order and the
+manual SQL fallback. Short version: Archive stops a bot answering on any
+channel with nothing deleted (reversible via Restore); Purge is a
+separately-confirmed, irreversible deletion of every row the bot has,
+including every call and chat transcript, only possible once already
+archived.

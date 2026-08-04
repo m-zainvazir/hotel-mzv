@@ -17,6 +17,7 @@ PSTN; detaching leaves the web call working. Typed chat (`scripts/chat_cli.py`,
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import sys
 
@@ -31,9 +32,23 @@ from app.channels.vapi_provisioning import (
 )
 from app.config import get_settings
 from app.logging_config import configure_logging, force_utf8_console
-from app.tenancy.loader import clear_tenant_cache, get_tenant_config
+from app.tenancy.loader import clear_tenant_cache, get_repository, get_tenant_config, set_repository
+from app.tenancy.supabase_repository import SupabaseTenantRepository
 
 console = Console()
+
+
+async def _init_repository() -> None:
+    """Mirror app/main.py's lifespan: without this, a panel-created tenant
+    (Supabase-only, no content/tenants/<id>.json — Phase 9 Part B) is
+    invisible here regardless of TENANT_SOURCE, since get_tenant_config
+    otherwise defaults to the JSON-file repository unconditionally. Same fix
+    as scripts/chat_cli.py's own _init_repository — found live (2026-08-03)
+    the moment a second script needed to resolve a panel-only tenant."""
+    if get_settings().tenant_source == "supabase":
+        repo = SupabaseTenantRepository(fallback=get_repository())
+        await repo.refresh()
+        set_repository(repo)
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -79,6 +94,7 @@ def main(argv: list[str] | None = None) -> int:
     configure_logging()
     args = _parse_args(argv)
     settings = get_settings()
+    asyncio.run(_init_repository())
 
     try:
         tenant = get_tenant_config(args.tenant)
@@ -109,7 +125,17 @@ def main(argv: list[str] | None = None) -> int:
                 return 1
 
             save_vapi_ids(
-                tenant.tenant_id, data_dir=settings.tenant_data_dir, assistant_id=assistant_id
+                tenant.tenant_id,
+                data_dir=settings.tenant_data_dir,
+                assistant_id=assistant_id,
+                tenant=tenant,
+            )
+            # Keep the in-memory tenant in sync with what was just persisted —
+            # the phone-number save below (if it fires) must build from the
+            # assistant_id that was just set, not the pre-provisioning state,
+            # regardless of whether that write lands in a JSON file or Supabase.
+            tenant = tenant.model_copy(
+                update={"vapi": tenant.vapi.model_copy(update={"assistant_id": assistant_id})}
             )
             console.print(f"[green]✓[/green] assistant [bold]{assistant_id}[/bold] up to date")
 
@@ -143,6 +169,7 @@ def main(argv: list[str] | None = None) -> int:
                     tenant.tenant_id,
                     data_dir=settings.tenant_data_dir,
                     phone_number_id=phone_number_id,
+                    tenant=tenant,
                 )
 
     except ProvisioningError as exc:

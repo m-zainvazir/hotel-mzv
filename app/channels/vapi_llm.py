@@ -33,6 +33,7 @@ from app.channels import vapi_schema
 from app.channels.security import require_vapi_secret
 from app.channels.vapi_schema import VapiChatRequest, VapiMessage
 from app.tenancy.loader import resolve_tenant_id
+from app.tenancy.repository import TenantNotFoundError
 
 logger = logging.getLogger(__name__)
 
@@ -64,10 +65,17 @@ async def chat_completions(request: Request):
     received_at = time.perf_counter()
     payload = VapiChatRequest.model_validate(await _json_body(request))
 
-    tenant_id = resolve_tenant_id(
-        assistant_id=payload.assistant_id,
-        phone_number=payload.dialled_number,
-    )
+    # Resolved (and any archived-tenant refusal raised) before anything
+    # streams — invariant #2 above only protects a turn already in flight,
+    # not this lookup, so a clean 404 here is safe.
+    try:
+        tenant_id = resolve_tenant_id(
+            assistant_id=payload.assistant_id,
+            phone_number=payload.dialled_number,
+        )
+    except TenantNotFoundError as exc:
+        logger.warning("vapi turn refused: %s", exc)
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="unknown tenant") from exc
     session_id = f"vapi:{payload.call_id or 'web'}"
     text = payload.latest_user_text()
 

@@ -21,17 +21,43 @@ row already exist with a different `updated_at`?) and the voice-consent gate
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
 import httpx
 
 from app.config import get_settings
-from app.tenancy.loader import clear_tenant_cache, get_repository
+from app.tenancy.loader import get_tenant_config, refresh_tenant_repository
 from app.tenancy.models import TenantConfig
+from app.tenancy.repository import TenantNotFoundError
+from app.tenancy.secrets import TenantSecretError, delete_tenant_secrets
 from app.tenancy.sync import TenantSyncError, _admin_client, sync_tenant
 
 logger = logging.getLogger(__name__)
+
+#: FK order for `purge_tenant` (Phase 9 Part B) — most of these tables have
+#: no `on delete cascade` from `tenants` (app/db/migrations/0001_schema.sql),
+#: so a naive `DELETE /tenants` is rejected for any bot that has ever taken a
+#: call. `services` / `mcp_servers` / `voice_consents` DO cascade already,
+#: but are still deleted explicitly and in order here — cascade would give
+#: no per-table row count, and a purge must be auditable. Extend this tuple
+#: with `("knowledge_chunks", "tenant_id")` / `("knowledge_documents",
+#: "tenant_id")` at the front once Part C's tables exist; they don't yet.
+_PURGE_TABLES: tuple[str, ...] = (
+    "knowledge_chunks",
+    "knowledge_documents",
+    "chat_messages",
+    "chat_sessions",
+    "escalations",
+    "messages",
+    "jobs",
+    "calls",
+    "services",
+    "mcp_servers",
+    "voice_consents",
+    "tenants",
+)
 
 #: Fields no principal other than an operator may change, even with perfect
 #: auth. Shipped now, inert — every principal today IS an operator, so this
@@ -63,6 +89,26 @@ OPERATOR_ONLY_PATHS: frozenset[str] = frozenset(
 class VersionConflictError(RuntimeError):
     """`expected_version` doesn't match the row's current `updated_at` —
     someone else (or another browser tab) saved first."""
+
+
+class TenantAlreadyExistsError(RuntimeError):
+    """`create_tenant` refuses to overwrite an existing `tenant_id` — a
+    duplicate is 409-worthy, never a silent upsert the way `save_tenant`'s
+    is (that one is *only* ever reached for a tenant the caller already
+    knows exists, via `PUT /tenants/{tenant_id}`)."""
+
+
+class TenantNotArchivedError(RuntimeError):
+    """`purge_tenant` refuses to run against anything but an already-archived
+    tenant — enforced here, not just at the route (`app/channels/admin.py`),
+    since this is the single most destructive operation in the codebase
+    (plan §9 Risk 5) and deserves defense in depth, not one gate."""
+
+
+class TenantPurgeError(RuntimeError):
+    """A row-deletion request failed partway through `purge_tenant` — surfaced
+    as-is (never silently swallowed) since a partial purge leaves orphaned
+    data an operator needs to know about."""
 
 
 class VoiceConsentRequiredError(RuntimeError):
@@ -203,18 +249,162 @@ async def save_tenant(
         if owns_client:
             await active.aclose()
 
-    # Refresh whatever's currently serving reads. Duck-typed: json mode's
-    # JsonFileTenantRepository has neither method, so this is a no-op there —
-    # exactly right, since content/tenants/*.json wasn't the thing that
-    # changed.
-    clear_tenant_cache()
-    repository = get_repository()
-    refresh = getattr(repository, "refresh", None)
-    if refresh is not None:
-        await refresh()
-    else:
-        invalidate = getattr(repository, "invalidate", None)
-        if invalidate is not None:
-            invalidate()
-
+    await refresh_tenant_repository()
     return config
+
+
+async def create_tenant(
+    config: TenantConfig, *, client: httpx.AsyncClient | None = None
+) -> TenantConfig:
+    """Create a brand-new tenant (Phase 9 Part B) — the panel's "+ New bot".
+
+    Refuses an existing `tenant_id` (`TenantAlreadyExistsError`, mapped to
+    409 by the route) rather than silently upserting over it, the opposite
+    of `save_tenant`'s job. Writes as `status: "onboarding"` first, then as
+    whatever final status `config` itself carries (skipped if that's already
+    `"onboarding"`) — matching `onboard_tenant.py`'s ordering, so a
+    half-created bot never looks live by accident even for the brief window
+    between the two writes. The admin route always passes `status="active"`
+    for a panel-created bot; `set_tenant_status` is the primitive for
+    changing it again later.
+    """
+    settings = get_settings()
+    owns_client = client is None
+    active = client or _admin_client(settings, timeout=settings.supabase_timeout_seconds)
+    try:
+        existing = await _current_row(config.tenant_id, active)
+        if existing is not None:
+            raise TenantAlreadyExistsError(f"tenant {config.tenant_id!r} already exists")
+
+        onboarding = config.model_copy(update={"status": "onboarding"})
+        await sync_tenant(onboarding, client=active)
+
+        if config.status != "onboarding":
+            await sync_tenant(config, client=active)
+    finally:
+        if owns_client:
+            await active.aclose()
+
+    await refresh_tenant_repository()
+    return config
+
+
+async def set_tenant_status(
+    tenant_id: str, status: str, *, client: httpx.AsyncClient | None = None
+) -> TenantConfig:
+    """Archive / restore (Phase 9 Part B) — a pure status flip, nothing else
+    about the tenant changes. Deliberately goes through `sync_tenant`
+    directly rather than `save_tenant`: no optimistic-concurrency version
+    check and no voice-consent gate apply to a status-only write, and both
+    would just add friction to what's meant to be a one-click panel action.
+    `TenantConfig.model_validate` (via `model_copy` + Pydantic's frozen
+    model semantics) is what actually enforces `status` is one of the four
+    legal values — an illegal one raises before any write is attempted.
+    """
+    current = get_tenant_config(tenant_id)
+    updated = TenantConfig.model_validate({**current.model_dump(mode="json"), "status": status})
+
+    settings = get_settings()
+    owns_client = client is None
+    active = client or _admin_client(settings, timeout=settings.supabase_timeout_seconds)
+    try:
+        await sync_tenant(updated, client=active)
+    finally:
+        if owns_client:
+            await active.aclose()
+
+    await refresh_tenant_repository()
+    return updated
+
+
+async def purge_tenant(
+    tenant_id: str, *, client: httpx.AsyncClient | None = None
+) -> dict[str, int]:
+    """Irreversibly delete every row this tenant has (Phase 9 Part B) —
+    the most destructive operation in the codebase (plan §9 Risk 5).
+
+    Refuses unless the tenant is already `"archived"` (`TenantNotArchivedError`,
+    mapped to 409 by the route, which also enforces the typed-confirmation
+    precondition on the request body — this function only ever sees a bare
+    `tenant_id`). Deletes in FK order (`_PURGE_TABLES`) since most of these
+    tables have no `on delete cascade` from `tenants`, then best-effort
+    cleans up Vault secrets, the Vapi assistant, and a committed
+    `content/tenants/<id>.json` if one exists — none of those three block on
+    each other or abort if one fails, since the row deletion above is
+    already irreversible by that point; each failure is logged instead.
+    Returns per-table row counts, and logs them too — a purge must be
+    auditable.
+    """
+    try:
+        current = get_tenant_config(tenant_id)
+    except TenantNotFoundError:
+        raise
+
+    if current.status != "archived":
+        raise TenantNotArchivedError(
+            f"tenant {tenant_id!r} must be archived before it can be purged "
+            f"(current status: {current.status!r})"
+        )
+
+    settings = get_settings()
+    owns_client = client is None
+    active = client or _admin_client(settings, timeout=settings.supabase_timeout_seconds)
+    counts: dict[str, int] = {}
+    try:
+        for table in _PURGE_TABLES:
+            counts[table] = await _delete_rows(active, table, tenant_id)
+    finally:
+        if owns_client:
+            await active.aclose()
+
+    logger.info("purged tenant %s: %s", tenant_id, counts)
+
+    try:
+        await delete_tenant_secrets(tenant_id)
+    except TenantSecretError:
+        logger.warning("purge %s: could not delete Vault secrets", tenant_id, exc_info=True)
+
+    if current.vapi.assistant_id:
+        try:
+            await asyncio.to_thread(_delete_vapi_assistant, current.vapi.assistant_id)
+        except Exception:
+            logger.warning("purge %s: could not delete Vapi assistant", tenant_id, exc_info=True)
+
+    json_path = settings.tenant_data_dir / f"{tenant_id}.json"
+    if json_path.is_file():
+        try:
+            json_path.unlink()
+        except OSError:
+            logger.warning("purge %s: could not remove %s", tenant_id, json_path, exc_info=True)
+
+    await refresh_tenant_repository()
+    return counts
+
+
+async def _delete_rows(client: httpx.AsyncClient, table: str, tenant_id: str) -> int:
+    response = await client.delete(
+        f"/{table}",
+        params={"tenant_id": f"eq.{tenant_id}"},
+        headers={"Prefer": "return=representation"},
+    )
+    if response.status_code >= 400:
+        raise TenantPurgeError(
+            f"could not delete {table} for {tenant_id!r}: {response.status_code} "
+            f"{response.text[:300]}"
+        )
+    if not response.content:
+        return 0
+    rows = response.json()
+    return len(rows) if isinstance(rows, list) else 0
+
+
+def _delete_vapi_assistant(assistant_id: str) -> None:
+    # Local import: app.channels.vapi_provisioning is otherwise unrelated to
+    # this module's day-to-day (JWT-scoped analytics reads, secret-key
+    # writes), and its own import chain has no business loading on every
+    # admin write — only the rare purge that actually has a Vapi assistant
+    # to clean up.
+    from app.channels.vapi_provisioning import VapiClient
+
+    with VapiClient() as vapi:
+        vapi.delete_assistant(assistant_id)

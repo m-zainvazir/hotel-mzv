@@ -29,6 +29,10 @@ def get_booking_provider(tenant: TenantConfig) -> BookingProvider:
         from app.tools.booking.calcom import CalcomBookingProvider
 
         return CalcomBookingProvider()
+    if choice == "mcp_calcom":
+        from app.tools.booking.mcp_calcom import McpBookingProvider
+
+        return McpBookingProvider()
     if choice == "google":
         from app.tools.booking.google import GoogleCalendarBookingProvider
 

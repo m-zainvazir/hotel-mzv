@@ -63,7 +63,13 @@ export function getSession(): Promise<SessionInfo> {
   return request("/session");
 }
 
-export function listTenantIds(): Promise<{ tenant_ids: string[] }> {
+export interface TenantSummary {
+  tenant_id: string;
+  name: string;
+  status: string;
+}
+
+export function listTenantIds(): Promise<{ tenant_ids: string[]; tenants: TenantSummary[] }> {
   return request("/tenants");
 }
 
@@ -165,6 +171,43 @@ export function saveTenantConfig(
   });
 }
 
+// --- bot lifecycle (Phase 9 Part B) -----------------------------------------
+
+export type CreateTenantMode = "blank" | "template" | "clone";
+
+export interface CreateTenantPayload {
+  mode: CreateTenantMode;
+  template?: string;
+  source_tenant_id?: string;
+  tenant_id: string;
+  name: string;
+  trade: string;
+  greeting: string;
+  escalation_phone: string;
+}
+
+export function createTenant(payload: CreateTenantPayload): Promise<TenantConfig> {
+  return request("/tenants", { method: "POST", body: JSON.stringify(payload) });
+}
+
+export function archiveTenant(tenantId: string): Promise<TenantConfig> {
+  return request(`/tenants/${tenantId}/archive`, { method: "POST" });
+}
+
+export function restoreTenant(tenantId: string): Promise<TenantConfig> {
+  return request(`/tenants/${tenantId}/restore`, { method: "POST" });
+}
+
+export function purgeTenant(
+  tenantId: string,
+  confirmTenantId: string,
+): Promise<{ tenant_id: string; deleted: Record<string, number> }> {
+  return request(`/tenants/${tenantId}/purge`, {
+    method: "POST",
+    body: JSON.stringify({ tenant_id: confirmTenantId }),
+  });
+}
+
 // --- calls / chats / jobs / escalations --------------------------------
 
 export interface CallSummary {
@@ -241,4 +284,105 @@ export interface JobRow {
 
 export function listJobs(tenantId: string): Promise<{ jobs: JobRow[] }> {
   return request(`/tenants/${tenantId}/jobs`);
+}
+
+// --- knowledge base / RAG (Phase 9 Part C) ----------------------------------
+
+export interface KnowledgeDocument {
+  id: string;
+  tenant_id: string;
+  title: string;
+  source_type: "text" | "file" | "url";
+  source_ref: string;
+  status: "pending" | "indexing" | "ready" | "failed";
+  error: string | null;
+  chunk_count: number;
+  bytes: number;
+  created_at: string;
+  indexed_at: string | null;
+}
+
+export interface KnowledgeHit {
+  chunk_id: string;
+  document_id: string;
+  document_title: string;
+  content: string;
+  similarity: number;
+}
+
+export function listKnowledge(tenantId: string): Promise<{ documents: KnowledgeDocument[] }> {
+  return request(`/tenants/${tenantId}/knowledge`);
+}
+
+export function addKnowledgeText(
+  tenantId: string,
+  title: string,
+  text: string,
+): Promise<KnowledgeDocument> {
+  return request(`/tenants/${tenantId}/knowledge/text`, {
+    method: "POST",
+    body: JSON.stringify({ title, text }),
+  });
+}
+
+export async function uploadKnowledgeFiles(
+  tenantId: string,
+  files: File[],
+): Promise<{ documents: (KnowledgeDocument | { title: string; status: string; error: string })[] }> {
+  const form = new FormData();
+  for (const file of files) form.append("files", file);
+  const token = getToken();
+  const headers = new Headers();
+  if (token) headers.set("Authorization", `Bearer ${token}`);
+  // No Content-Type here — the browser sets the multipart boundary itself;
+  // setting it manually (as `request()`'s JSON path does) breaks the upload.
+  const response = await fetch(`/admin/api/tenants/${tenantId}/knowledge/upload`, {
+    method: "POST",
+    headers,
+    body: form,
+  });
+  if (response.status === 401) {
+    clearToken();
+    throw new AuthError("unauthorized — sign in again");
+  }
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({ detail: response.statusText }));
+    throw new ApiError(response.status, body.detail ?? response.statusText);
+  }
+  return response.json();
+}
+
+export function addKnowledgeUrl(
+  tenantId: string,
+  url: string,
+  crawl: boolean,
+): Promise<{ documents: KnowledgeDocument[] }> {
+  return request(`/tenants/${tenantId}/knowledge/url`, {
+    method: "POST",
+    body: JSON.stringify({ url, crawl }),
+  });
+}
+
+export function reindexKnowledgeDocument(
+  tenantId: string,
+  documentId: string,
+): Promise<KnowledgeDocument> {
+  return request(`/tenants/${tenantId}/knowledge/${documentId}/reindex`, { method: "POST" });
+}
+
+export function deleteKnowledgeDocument(
+  tenantId: string,
+  documentId: string,
+): Promise<{ deleted: string }> {
+  return request(`/tenants/${tenantId}/knowledge/${documentId}/delete`, { method: "POST" });
+}
+
+export function searchKnowledgePreview(
+  tenantId: string,
+  query: string,
+): Promise<{ hits: KnowledgeHit[] }> {
+  return request(`/tenants/${tenantId}/knowledge/search`, {
+    method: "POST",
+    body: JSON.stringify({ query }),
+  });
 }

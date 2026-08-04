@@ -21,6 +21,11 @@
     "Hold on, I'm getting someone for you right now.",
     "Stay with me — putting you through now."
   ],
+  "search_knowledge": [
+    "Let me check on that.",
+    "Good question — one second, let me look that up.",
+    "Let me check our records for you."
+  ],
   "default": [
     "One moment.",
     "Bear with me a second."

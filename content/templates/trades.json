@@ -1,0 +1,106 @@
+{
+  "tenant_id": "template",
+  "name": "New Trades Business",
+  "trade": "trades",
+  "timezone": "America/Chicago",
+  "status": "onboarding",
+  "phone_numbers": [],
+  "widget_keys": [],
+  "greeting": "Thanks for calling — what's going on?",
+  "persona": "Calm, no-nonsense, gets to the point fast. Reassures people dealing with a problem right now.",
+  "hours": {
+    "monday": { "open": "07:00:00", "close": "16:00:00" },
+    "tuesday": { "open": "07:00:00", "close": "16:00:00" },
+    "wednesday": { "open": "07:00:00", "close": "16:00:00" },
+    "thursday": { "open": "07:00:00", "close": "16:00:00" },
+    "friday": { "open": "07:00:00", "close": "15:00:00" },
+    "saturday": null,
+    "sunday": null
+  },
+  "services": [
+    {
+      "slug": "diagnostic-visit",
+      "name": "Diagnostic visit",
+      "description": "A technician assesses the problem on site.",
+      "duration_minutes": 60,
+      "price_usd": null,
+      "emergency": false,
+      "aliases": ["come take a look", "inspection", "diagnose", "assessment"],
+      "event_type_id": null
+    },
+    {
+      "slug": "repair-visit",
+      "name": "Repair visit",
+      "description": "Standard repair or service call.",
+      "duration_minutes": 120,
+      "price_usd": null,
+      "emergency": false,
+      "aliases": ["fix it", "repair", "service call"],
+      "event_type_id": null
+    },
+    {
+      "slug": "urgent-callout",
+      "name": "Urgent callout",
+      "description": "Same-day response for something that can't wait.",
+      "duration_minutes": 30,
+      "price_usd": null,
+      "emergency": true,
+      "aliases": ["urgent", "emergency", "right now", "asap"],
+      "event_type_id": null
+    }
+  ],
+  "emergency": {
+    "escalation_phone": "+15550000000",
+    "keywords": [
+      "gas leak",
+      "smell gas",
+      "burst pipe",
+      "flooding",
+      "flooded",
+      "sparking",
+      "smoke",
+      "no power",
+      "water everywhere",
+      "can'?t shut off"
+    ],
+    "holding_message": "Okay — if you can do so safely, shut things off at the source. I'm getting someone on the line right now.",
+    "alert_template": "EMERGENCY — {customer_name} ({customer_phone}): {reason}. Caller is on the line now.",
+    "allow_warm_transfer": true
+  },
+  "booking": {
+    "provider": "stub",
+    "calendar_id": null,
+    "event_type_id": null,
+    "booking_field_map": {},
+    "require_address": true,
+    "slot_granularity_minutes": 60,
+    "lead_time_hours": 3,
+    "horizon_days": 7,
+    "max_slots_returned": 3
+  },
+  "notifications": {
+    "provider": "stub",
+    "from_number": null,
+    "confirmation_template": "Booked — {service} on {when} at {address}. Text back to change it."
+  },
+  "voice": {
+    "provider": "cartesia",
+    "voice_id": null,
+    "model": "sonic-2",
+    "speed": 1.0
+  },
+  "vapi": {
+    "assistant_id": null,
+    "phone_number_id": null,
+    "max_duration_seconds": 600,
+    "silence_timeout_seconds": 20
+  },
+  "chat": {
+    "allowed_origins": [],
+    "accent_color": "#0f766e",
+    "launcher_label": "Chat with us",
+    "quick_replies": true,
+    "greeting": null
+  },
+  "mcp_servers": []
+}

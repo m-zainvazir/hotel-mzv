@@ -183,6 +183,37 @@ def _admin_client(settings) -> httpx.AsyncClient:
     )
 
 
+async def delete_tenant_secrets(tenant_id: str, *, client: httpx.AsyncClient | None = None) -> None:
+    """Delete every Vault secret this tenant has, via `public.delete_tenant_secrets`
+    (Phase 9 Part B — purge). Same admin posture as `set_tenant_secret`: the
+    Supabase **secret** key, never a tenant-scoped JWT — purge is an
+    operator action, not a tenant reading/writing its own data.
+    """
+    settings = get_settings()
+    if not settings.supabase_url or not settings.supabase_secret_key:
+        raise TenantSecretError(
+            "SUPABASE_URL / SUPABASE_SECRET_KEY must be set to delete a tenant's secrets"
+        )
+
+    owns_client = client is None
+    active = client or _admin_client(settings)
+    try:
+        response = await active.post("/rpc/delete_tenant_secrets", json={"tenant_id": tenant_id})
+    except httpx.HTTPError as exc:
+        raise TenantSecretError(f"could not delete secrets for {tenant_id}: {exc}") from exc
+    finally:
+        if owns_client:
+            await active.aclose()
+
+    if response.status_code >= 400:
+        raise TenantSecretError(
+            f"delete_tenant_secrets {tenant_id} -> {response.status_code}: {response.text[:200]}"
+        )
+    with _lock:
+        for key in [k for k in _cache if k[0] == tenant_id]:
+            del _cache[key]
+
+
 def clear_secret_cache() -> None:
     """Test hook — drop cached secrets so a swapped vault value takes effect."""
     with _lock:

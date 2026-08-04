@@ -22,7 +22,7 @@ PostgREST semantics worth knowing before touching this file:
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from typing import Any
 
 import httpx
@@ -37,6 +37,9 @@ from app.db.models import (
     DailyMetrics,
     Escalation,
     Job,
+    KnowledgeChunk,
+    KnowledgeDocument,
+    KnowledgeHit,
     OutboundMessage,
     TenantMetrics,
 )
@@ -95,7 +98,7 @@ class SupabaseStore:
         *,
         tenant_id: str,
         params: dict[str, str] | list[tuple[str, str]] | None = None,
-        json_body: dict[str, Any] | None = None,
+        json_body: dict[str, Any] | list[dict[str, Any]] | None = None,
         prefer: str | None = None,
     ) -> httpx.Response:
         headers = {"Authorization": f"Bearer {tenant_jwt(tenant_id)}"}
@@ -471,6 +474,127 @@ class SupabaseStore:
         rows = _rows(response)
         return _row_to_call(rows[0]) if rows else None
 
+    # --- knowledge base / RAG (Phase 9 Part C) ----------------------------
+    #
+    # Every method here goes through the tenant-scoped JWT `_request` already
+    # mints — never the secret key. Deleting a tenant's own uploaded document
+    # is ordinary tenant-scoped CRUD (0011_knowledge.sql grants `delete` on
+    # these two tables specifically, unlike everywhere else in this schema),
+    # not the cross-table destructive action `purge_tenant`
+    # (app/tenancy/admin.py) is.
+
+    async def aadd_document(self, document: KnowledgeDocument) -> KnowledgeDocument:
+        response = await self._request(
+            "POST",
+            "/knowledge_documents",
+            tenant_id=document.tenant_id,
+            json_body=_knowledge_document_to_row(document),
+            prefer="return=representation",
+        )
+        rows = _rows(response)
+        if not rows:
+            raise SupabaseStoreError(
+                f"insert into knowledge_documents returned no row for {document.id!r}"
+            )
+        return _row_to_knowledge_document(rows[0])
+
+    async def alist_documents(self, tenant_id: str) -> list[KnowledgeDocument]:
+        response = await self._request(
+            "GET",
+            "/knowledge_documents",
+            tenant_id=tenant_id,
+            params={"tenant_id": f"eq.{tenant_id}", "order": "created_at.desc"},
+        )
+        return [_row_to_knowledge_document(row) for row in _rows(response)]
+
+    async def aget_document(self, tenant_id: str, document_id: str) -> KnowledgeDocument | None:
+        response = await self._request(
+            "GET",
+            "/knowledge_documents",
+            tenant_id=tenant_id,
+            params={"tenant_id": f"eq.{tenant_id}", "id": f"eq.{document_id}", "limit": "1"},
+        )
+        rows = _rows(response)
+        return _row_to_knowledge_document(rows[0]) if rows else None
+
+    async def adelete_document(self, tenant_id: str, document_id: str) -> None:
+        # Chunks cascade (FK `on delete cascade`, 0011_knowledge.sql) — no
+        # separate /knowledge_chunks call needed.
+        await self._request(
+            "DELETE",
+            "/knowledge_documents",
+            tenant_id=tenant_id,
+            params={"tenant_id": f"eq.{tenant_id}", "id": f"eq.{document_id}"},
+        )
+
+    async def aset_document_status(
+        self,
+        tenant_id: str,
+        document_id: str,
+        *,
+        status: str,
+        error: str | None = None,
+        chunk_count: int | None = None,
+    ) -> KnowledgeDocument:
+        body: dict[str, Any] = {"status": status, "error": error}
+        if chunk_count is not None:
+            body["chunk_count"] = chunk_count
+        if status == "ready":
+            body["indexed_at"] = datetime.now(UTC).isoformat()
+        response = await self._request(
+            "PATCH",
+            "/knowledge_documents",
+            tenant_id=tenant_id,
+            params={"tenant_id": f"eq.{tenant_id}", "id": f"eq.{document_id}"},
+            json_body=body,
+            prefer="return=representation",
+        )
+        rows = _rows(response)
+        if not rows:
+            raise KeyError(f"knowledge document {document_id} not found for tenant {tenant_id}")
+        return _row_to_knowledge_document(rows[0])
+
+    async def aupsert_chunks(self, tenant_id: str, chunks: list[KnowledgeChunk]) -> None:
+        """Always a plain multi-row insert, never an actual update — a
+        re-index deletes the old chunk set first (`adelete_document` then a
+        fresh `aadd_document`, driven by `app/rag/ingest.py`) rather than
+        this method diffing old vs. new chunks. "Upsert" is the protocol's
+        name for symmetry with the rest of this codebase's store methods,
+        not a promise of ON CONFLICT semantics here."""
+        if not chunks:
+            return
+        await self._request(
+            "POST",
+            "/knowledge_chunks",
+            tenant_id=tenant_id,
+            json_body=[_knowledge_chunk_to_row(chunk) for chunk in chunks],
+            prefer="return=minimal",
+        )
+
+    async def asearch_chunks(
+        self,
+        tenant_id: str,
+        *,
+        query_embedding: list[float],
+        top_k: int,
+        min_similarity: float,
+    ) -> list[KnowledgeHit]:
+        # The RPC path every other analytics read already uses
+        # (atenant_metrics, above) — tenant JWT, never the secret key.
+        # match_knowledge_chunks (0011_knowledge.sql) has no tenant_id
+        # parameter; RLS on the joined tables does the scoping.
+        response = await self._request(
+            "POST",
+            "/rpc/match_knowledge_chunks",
+            tenant_id=tenant_id,
+            json_body={
+                "query_embedding": query_embedding,
+                "match_count": top_k,
+                "min_similarity": min_similarity,
+            },
+        )
+        return [_row_to_knowledge_hit(row) for row in _rows(response)]
+
 
 # --- row <-> model mapping ---------------------------------------------------
 
@@ -676,4 +800,63 @@ def _row_to_tenant_metrics(row: dict[str, Any]) -> TenantMetrics:
         escalations=row.get("escalations") or 0,
         chat_sessions=row.get("chat_sessions") or 0,
         chat_messages=row.get("chat_messages") or 0,
+    )
+
+
+def _knowledge_document_to_row(document: KnowledgeDocument) -> dict[str, Any]:
+    return {
+        "id": document.id,
+        "tenant_id": document.tenant_id,
+        "title": document.title,
+        "source_type": document.source_type,
+        "source_ref": document.source_ref,
+        "status": document.status,
+        "error": document.error,
+        "chunk_count": document.chunk_count,
+        "bytes": document.bytes,
+        "created_at": document.created_at.isoformat(),
+        "indexed_at": document.indexed_at.isoformat() if document.indexed_at else None,
+    }
+
+
+def _row_to_knowledge_document(row: dict[str, Any]) -> KnowledgeDocument:
+    return KnowledgeDocument(
+        id=row["id"],
+        tenant_id=row["tenant_id"],
+        title=row.get("title") or "",
+        source_type=row.get("source_type") or "text",
+        source_ref=row.get("source_ref") or "",
+        status=row.get("status") or "pending",
+        error=row.get("error"),
+        chunk_count=row.get("chunk_count") or 0,
+        bytes=row.get("bytes") or 0,
+        created_at=row["created_at"],
+        indexed_at=row.get("indexed_at"),
+    )
+
+
+def _knowledge_chunk_to_row(chunk: KnowledgeChunk) -> dict[str, Any]:
+    return {
+        "id": chunk.id,
+        "tenant_id": chunk.tenant_id,
+        "document_id": chunk.document_id,
+        "ordinal": chunk.ordinal,
+        "content": chunk.content,
+        "token_count": chunk.token_count,
+        # pgvector's text input format IS a JSON-array-shaped literal
+        # ("[0.1,0.2,...]"), so the plain JSON list httpx serializes here is
+        # exactly what PostgREST forwards to Postgres for a `vector` column
+        # — no extra encoding needed.
+        "embedding": chunk.embedding,
+        "created_at": chunk.created_at.isoformat(),
+    }
+
+
+def _row_to_knowledge_hit(row: dict[str, Any]) -> KnowledgeHit:
+    return KnowledgeHit(
+        chunk_id=row["chunk_id"],
+        document_id=row["document_id"],
+        document_title=row.get("document_title") or "",
+        content=row.get("content") or "",
+        similarity=row.get("similarity") or 0.0,
     )

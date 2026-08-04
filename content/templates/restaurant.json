@@ -1,0 +1,85 @@
+{
+  "tenant_id": "template",
+  "name": "New Restaurant",
+  "trade": "restaurant",
+  "timezone": "America/New_York",
+  "status": "onboarding",
+  "phone_numbers": [],
+  "widget_keys": [],
+  "greeting": "Thanks for calling — how can I help you today?",
+  "persona": "Warm and hospitable, moves quickly during busy hours without sounding rushed.",
+  "hours": {
+    "monday": null,
+    "tuesday": { "open": "11:00:00", "close": "22:00:00" },
+    "wednesday": { "open": "11:00:00", "close": "22:00:00" },
+    "thursday": { "open": "11:00:00", "close": "22:00:00" },
+    "friday": { "open": "11:00:00", "close": "23:00:00" },
+    "saturday": { "open": "11:00:00", "close": "23:00:00" },
+    "sunday": { "open": "11:00:00", "close": "21:00:00" }
+  },
+  "services": [
+    {
+      "slug": "table-reservation",
+      "name": "Table reservation",
+      "description": "Reserve a table for dine-in.",
+      "duration_minutes": 90,
+      "price_usd": null,
+      "emergency": false,
+      "aliases": ["table", "reservation", "book a table", "dinner", "lunch"],
+      "event_type_id": null
+    },
+    {
+      "slug": "private-event",
+      "name": "Private event",
+      "description": "Reserve the private dining room for a group or event.",
+      "duration_minutes": 180,
+      "price_usd": null,
+      "emergency": false,
+      "aliases": ["private dining", "event", "party", "group booking"],
+      "event_type_id": null
+    }
+  ],
+  "emergency": {
+    "escalation_phone": "+15550000000",
+    "keywords": ["allergic reaction", "choking", "fire"],
+    "holding_message": "That sounds serious — I'm getting our manager on the line right now.",
+    "alert_template": "URGENT — {customer_name} ({customer_phone}): {reason}. Caller is on the line now.",
+    "allow_warm_transfer": false
+  },
+  "booking": {
+    "provider": "stub",
+    "calendar_id": null,
+    "event_type_id": null,
+    "booking_field_map": {},
+    "require_address": false,
+    "slot_granularity_minutes": 30,
+    "lead_time_hours": 1,
+    "horizon_days": 30,
+    "max_slots_returned": 3
+  },
+  "notifications": {
+    "provider": "stub",
+    "from_number": null,
+    "confirmation_template": "You're booked for {service} on {when}. Reply here if anything changes."
+  },
+  "voice": {
+    "provider": "cartesia",
+    "voice_id": null,
+    "model": "sonic-2",
+    "speed": 1.0
+  },
+  "vapi": {
+    "assistant_id": null,
+    "phone_number_id": null,
+    "max_duration_seconds": 600,
+    "silence_timeout_seconds": 20
+  },
+  "chat": {
+    "allowed_origins": [],
+    "accent_color": "#0f766e",
+    "launcher_label": "Chat with us",
+    "quick_replies": true,
+    "greeting": null
+  },
+  "mcp_servers": []
+}

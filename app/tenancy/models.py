@@ -93,7 +93,7 @@ class BookingSettings(BaseModel):
     #: separate "supabase" option — that would be the same provider under a
     #: second name, the two-sources-of-truth trap Phase 3 already removed
     #: `booking_provider` for (see CLAUDE.md).
-    provider: Literal["stub", "google", "calcom"] = "stub"
+    provider: Literal["stub", "google", "calcom", "mcp_calcom"] = "stub"
     calendar_id: str | None = None
     #: Cal.com only: the tenant-wide event type, normally configured with
     #: multiple durations enabled so one event type serves every service.
@@ -160,6 +160,26 @@ class VapiSettings(BaseModel):
     silence_timeout_seconds: int = Field(default=20, ge=5, le=120)
 
 
+class KnowledgeSettings(BaseModel):
+    """Per-bot RAG knowledge base (Phase 9 Part C).
+
+    `enabled` is the seam `app/tools/registry.py::native_tools_for` has been
+    a deliberate no-op waiting for since Phase 1 — a bot with this off pays
+    nothing extra (`search_knowledge` is never bound, the fixed prompt-token
+    floor is unchanged). `top_k`/`min_similarity` tune retrieval quality per
+    bot; `max_chunks` is a per-tenant quota against the free-tier ceiling —
+    Supabase's own storage limit is shared across every tenant, so one bot
+    uploading an unbounded corpus would starve every other tenant's quota.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    enabled: bool = False
+    top_k: int = Field(default=4, gt=0, le=20)
+    min_similarity: float = Field(default=0.35, ge=0.0, le=1.0)
+    max_chunks: int = Field(default=5000, gt=0)
+
+
 class ChatSettings(BaseModel):
     """Widget presentation + origin policy (Phase 5).
 
@@ -181,6 +201,14 @@ class ChatSettings(BaseModel):
 
 
 _MCP_SERVER_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
+#: Phase 9 Part B — same reasoning as `_MCP_SERVER_NAME_RE`: `tenant_id`
+#: becomes a checkpointer thread-id prefix (`f"{tenant}:vapi:{call.id}"`), a
+#: Vault secret prefix (`<tenant_id>::<key>`), and a `content/tenants/`
+#: filename. Unvalidated it's a real hazard, and the admin create route
+#: (Step B4) is the first thing that would ever accept an operator-typed,
+#: hostile one — a JSON-authored tenant id was previously trusted by
+#: construction (only ever hand-written by whoever owns the repo).
+_TENANT_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,47}$")
 
 
 class McpServerConfig(BaseModel):
@@ -204,6 +232,15 @@ class McpServerConfig(BaseModel):
     args: list[str] = Field(default_factory=list)
     # Secret *references* only — resolved from the vault at load time, never inlined.
     auth_secret_ref: str | None = None
+    #: "secret" (default) is the `${secret}`-substitution shape above. "oauth"
+    #: (Phase 9 Part A) is Cal.com's hosted MCP server specifically — the
+    #: bearer is resolved at connect time from `app/mcp/oauth.py`'s headless
+    #: refresh flow instead, and `auth_secret_ref` is ignored. Not exposed to
+    #: tenant-authored `mcp_servers` JSON today: `McpBookingProvider`
+    #: constructs this config in code, never from tenant config, the same way
+    #: it never becomes a model-facing tool (plan §9 "Why the swap is at the
+    #: provider layer").
+    auth: Literal["secret", "oauth"] = "secret"
 
     @field_validator("name")
     @classmethod
@@ -241,7 +278,13 @@ class TenantConfig(BaseModel):
     name: str
     trade: str
     timezone: str = "UTC"
-    status: Literal["active", "paused", "onboarding"] = "active"
+    #: "archived" (Phase 9 Part B) is a soft-delete: `resolve_tenant_id`
+    #: refuses to serve one on any channel, but every row survives until an
+    #: explicit, separately-confirmed purge. Not the same as "paused" —
+    #: paused is a business's own temporary closure (still fully configured,
+    #: still visible in the panel's main list); archived is the panel's
+    #: lifecycle state for "this bot shouldn't exist as a live thing anymore".
+    status: Literal["active", "paused", "onboarding", "archived"] = "active"
 
     phone_numbers: list[str] = Field(default_factory=list)
     widget_keys: list[str] = Field(default_factory=list)
@@ -263,6 +306,18 @@ class TenantConfig(BaseModel):
     vapi: VapiSettings = Field(default_factory=VapiSettings)
     chat: ChatSettings = Field(default_factory=ChatSettings)
     mcp_servers: list[McpServerConfig] = Field(default_factory=list)
+    knowledge: KnowledgeSettings = Field(default_factory=KnowledgeSettings)
+
+    @field_validator("tenant_id")
+    @classmethod
+    def _legal_tenant_id(cls, value: str) -> str:
+        if not _TENANT_ID_RE.match(value):
+            raise ValueError(
+                f"tenant_id {value!r} must match {_TENANT_ID_RE.pattern} — it becomes a "
+                "checkpointer thread-id prefix, a Vault secret prefix and a "
+                "content/tenants/ filename"
+            )
+        return value
 
     @field_validator("hours")
     @classmethod
@@ -297,16 +352,20 @@ class TenantConfig(BaseModel):
     @model_validator(mode="after")
     def _calcom_tenants_declare_event_types(self) -> TenantConfig:
         """Fail at config load, not mid-call, when a calcom tenant has no way
-        to know which event type to book against."""
-        if self.booking.provider != "calcom":
+        to know which event type to book against. Applies to `"mcp_calcom"`
+        too — `McpBookingProvider` resolves the event type the same way
+        `CalcomBookingProvider` does (`_event_type_for`), transport is the
+        only difference between the two."""
+        if self.booking.provider not in ("calcom", "mcp_calcom"):
             return self
         if self.booking.event_type_id is None and any(
             s.event_type_id is None for s in self.services
         ):
             raise ValueError(
-                "booking.provider is 'calcom' but booking.event_type_id is unset and "
-                "some services have no event_type_id override — every service needs "
-                "either a tenant-wide booking.event_type_id or its own event_type_id"
+                f"booking.provider is {self.booking.provider!r} but booking.event_type_id "
+                "is unset and some services have no event_type_id override — every "
+                "service needs either a tenant-wide booking.event_type_id or its own "
+                "event_type_id"
             )
         return self
 

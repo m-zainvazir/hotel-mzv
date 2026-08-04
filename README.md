@@ -4,8 +4,10 @@ One LangGraph brain, two channels (phone + chat), many tenants. Full spec in
 [`AI-Receptionist-Build-Plan.md`](AI-Receptionist-Build-Plan.md); conventions in
 [`CLAUDE.md`](CLAUDE.md).
 
-**Status: Phases 1–7 complete and deployed; Phase 8 (analytics + per-tenant
-admin) code-complete, pending live migration/deploy.** Live on Railway
+**Status: Phases 1–8 complete. Phase 8 (analytics + per-tenant admin) is now
+live-verified against the real Supabase project — all nine migrations are
+applied and the admin surface is proven end to end; turning it on in Railway
+is the one remaining step (see "Admin dashboard" below).** Live on Railway
 (`us-east4`, Docker, one replica), backed by a Supabase project in
 `us-east-1`. The brain runs on Groq/Gemini with the five
 native tools wired, and is reachable by typed chat, an embeddable chat
@@ -15,9 +17,9 @@ appointments against a live Cal.com calendar. Supabase now backs storage
 per-tenant secrets in Vault, and a durable Postgres checkpointer — all
 live-verified against a real project (see `plans/phase4.md`). The chat
 widget's own `/chat/session` handshake, event filtering and transcript
-persistence are live-verified too (see `plans/phase5.md`) — the two new
-tables it needs (`chat_sessions`/`chat_messages`, `0006_chat.sql`) still need
-applying to a live project the same manual way every prior migration did.
+persistence are live-verified too (see `plans/phase5.md`), and the two tables
+it needs (`chat_sessions`/`chat_messages`, `0006_chat.sql`) are applied and
+carrying real rows.
 A tenant can now connect **any number of MCP servers** — a CRM, a search
 tool, an internal API — and the brain uses their tools in conversation
 alongside the five native ones (see `plans/phase6.md`); a first-party demo
@@ -29,10 +31,10 @@ booking logic (durable once Supabase is the store, just no external calendar
 sync) as the second example tenant. Flipping any tenant's provider is a
 one-line JSON edit either way — see `content/README.md`. An admin dashboard
 at `/admin` now gives an operator per-tenant analytics and a real config
-editor (see "Admin dashboard" below and `plans/phase8.md`) — code-complete
-and fully tested offline, not yet live-verified (its own two new migrations
-aren't applied to the live project yet, same "next manual step" every prior
-phase has left behind).
+editor (see "Admin dashboard" below and `plans/phase8.md`) — live-verified
+against the real project, including the acceptance criterion: a greeting
+edited in the panel is spoken by the receptionist on the very next turn, with
+no restart and no redeploy.
 
 ## Talk to it — five doors, one brain
 
@@ -276,11 +278,15 @@ second example tenant.
 |---|---|
 | Scheduling: real Cal.com calendar for hotel-mzv; hours/lead-time/conflicts logic (durable, DB-backed once Supabase is the store) for any tenant on `"stub"` (northside-plumbing) | The calendar *itself*, for tenants on `"stub"` |
 | Emergency detection; Vapi warm transfer (voice, on by default once a tenant has an `escalation_phone`) | The SMS alert/confirmation leg — no tenant has `notifications.provider: "twilio"` yet |
-| Storage: jobs/calls/messages/escalations in Supabase Postgres with real RLS, per-tenant secrets in Vault, a durable checkpointer | Tenant *config* still reads from JSON files **by default** — `TENANT_SOURCE=supabase` (Phase 8) makes the flip real, required once `ADMIN_ENABLED=true`, but not yet live-verified against the real project |
+| Storage: jobs/calls/messages/escalations in Supabase Postgres with real RLS, per-tenant secrets in Vault, a durable checkpointer. `TENANT_SOURCE=supabase` is live-verified — the running app reads tenant config from Postgres, and degrades loudly to committed JSON if the snapshot fails | Tenant *config* still reads from JSON files **by default** (dev/test stay on `"json"`, zero test churn); `supabase` is required once `ADMIN_ENABLED=true` |
 | Voice: streaming, tenancy, call records, provisioning; consent enforcement (Python + a DB trigger) | The actual voice clone — no tenant has a real cloned `voice_id` yet, needs an audio sample + written consent |
 | Per-tenant Cal.com/Twilio credentials via Vault, live-verified | A second real Cal.com account, to prove two tenants booking into two different calendars end-to-end (currently only credential *resolution* is proven, not a full live booking) |
-| Chat widget: handshake, streaming, quick replies, event filtering, CORS — live-verified end to end against real Gemini + Cal.com | `chat_sessions`/`chat_messages` (`app/db/migrations/0006_chat.sql`) — written and offline-tested, but not yet applied to a live project; until then transcript writes fail (caught, logged, never break the stream) and every conversation lives only in the checkpointer |
-| MCP: any tenant can connect HTTP MCP servers (registry, secret substitution, per-server timeouts, tenant-scoped caching) — proven against a first-party demo server (`scripts/demo_mcp_server.py`) | A concrete third-party search/scraper server (Tavily/Firecrawl/Exa) — the config path is generic and vendor-neutral, just needs a key; `mcp_servers` (`app/db/migrations/0007_mcp.sql`) not yet applied to a live project either |
+| Chat widget: handshake, streaming, quick replies, event filtering, CORS — live-verified end to end against real Gemini + Cal.com. `chat_sessions`/`chat_messages` (`0006_chat.sql`) applied and durably transcribing | — |
+| MCP: any tenant can connect HTTP MCP servers (registry, secret substitution, per-server timeouts, tenant-scoped caching) — proven against a first-party demo server (`scripts/demo_mcp_server.py`); `mcp_servers` (`0007_mcp.sql`) applied | A concrete third-party search/scraper server (Tavily/Firecrawl/Exa) — the config path is generic and vendor-neutral, just needs a key |
+| Admin + analytics: all nine migrations applied; five `security_invoker` views proven to leak nothing to the anon key; config edits live on the next turn; voice-consent gate and its trigger fix both proven live | Enabling `/admin` on Railway (three variables, set together) — the app is verified, the deployment switch isn't flipped |
+| Cal.com over MCP (`booking.provider: "mcp_calcom"`, `plans/phase9.md` Part A) — live-verified: a real `authorize_calcom` grant, a real `check_availability` + `create_booking` through the hosted `mcp.cal.com` server, confirmed against Cal.com's own `/v2/bookings` API to match a `"calcom"`-provider booking on event type, duration, attendee-email pattern and metadata. Warm-state latency ties the REST provider (~620ms p50, both inside the §13 budget) | `cancel_booking`/`reschedule_booking` (Cal.com's MCP server exposes both, nothing here calls them yet — `plans/phase10.md` item 5); a second real tenant booking through MCP to prove cross-tenant isolation the same way Phase 4 proved it for the REST provider |
+| Bot lifecycle (`plans/phase9.md` Part B) — create (blank/template/clone)/archive/restore/purge, all from `/admin`; an archived bot is refused on both voice and chat (proven against real routes, not just unit tests); purge deletes in FK order with per-table row counts, offline-tested end to end (42 tests, `tests/test_admin_tenant_crud.py`); `0010_lifecycle.sql` applied live and its `archive` → `purge` path live-verified end to end by actually archiving and purging a real scratch tenant | A real click-through of the new UI in a browser (build + route tests pass; the Chrome extension wasn't available to drive an actual session this session) |
+| Per-bot knowledge base / RAG (`plans/phase9.md` Part C) — `search_knowledge` is the first *conditionally bound* native tool (`native_tools_for`, gated on both `KNOWLEDGE_ENABLED` and a tenant's own `knowledge.enabled`); paste/upload/crawl ingestion, pure-Python chunking with paragraph/sentence-boundary preference and overlap, pgvector cosine search (`0011_knowledge.sql`, HNSW index — applied live, RLS/grants/index/RPC/cron jobs all confirmed against the real database), a Knowledge tab in `/admin` with a live search preview, offline-tested end to end (55 tests across `test_knowledge_store.py`/`test_rag_chunking.py`/`test_rag_extract.py`/`test_knowledge_tool.py`, plus 3 more in `test_api.py`'s `/health` coverage) | A real embedding call against Gemini's `batchEmbedContents` — the request/response shape is implemented per its documented contract but has not been exercised against a live account; a real ingestion + `search_knowledge` retrieval through the running app; a real crawl against a live URL; a browser click-through of the Knowledge tab |
 
 See `plans/phase4.md`, `plans/phase5.md` and `plans/phase6.md` for the full
 implementation records and live-verification checklists.
@@ -331,12 +337,25 @@ future logged-in tenant's own reads would use — so that flip
 **Nothing here touches the brain.** It's a new read/write surface over
 tenant config and existing storage — `app/brain/` is unmodified.
 
-Not yet live-verified: `0008_analytics.sql` and `0009_admin.sql` aren't
-applied to the live Supabase project, so `/admin/api/overview`'s per-tenant
-metrics currently degrade cleanly (a per-tenant "failed to load", proven
-against the real project, not just offline) until that migration step
-happens — same "apply the SQL by hand" step every prior phase has needed.
-There's also no per-tenant LLM cost or per-turn latency anywhere in this
+**Live-verified.** `0008_analytics.sql` and `0009_admin.sql` are applied, and
+the checklist in `plans/phase8.md` Step 10 passed against the real project:
+the five analytics views all carry `security_invoker=true` and return zero
+rows to the anon key while each tenant JWT sees only its own; a greeting
+edited through the panel was served by the running app on the very next
+request; invalid edits 422 with per-field `loc` paths; a stale `If-Match`
+409s; setting `voice.voice_id` without a consent row 409s naming the exact
+`onboard_tenant` command; the `0009` trigger fix holds (an unrelated save on
+a tenant that *has* a `voice_id` succeeds — the landmine `plans/phase8.md`
+flagged, now proven defused); removing a service deletes the orphan row and
+leaves its siblings intact; `sync_tenants` refuses to stomp live config
+without `--force`; and the admin limiter 429s with `Retry-After`.
+
+What remains is the deployment switch, not the app: set `ADMIN_ENABLED=true`,
+`ADMIN_AUTH_TOKEN` and `TENANT_SOURCE=supabase` in Railway **together** —
+splitting them trips the phantom-edit preflight and crashes the boot in
+between.
+
+There's still no per-tenant LLM cost or per-turn latency anywhere in this
 app (`app/brain/metrics.py` is process-global by design), so the dashboard
 doesn't show either — the "Vapi telephony cost" tile is exactly that, not a
 total cost figure.

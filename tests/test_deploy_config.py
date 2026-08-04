@@ -25,7 +25,17 @@ def test_runtime_stage_installs_from_the_lockfile():
 
 
 def test_deps_stage_installs_the_production_extras():
-    assert '".[postgres,mcp,google]"' in DOCKERFILE
+    assert '".[postgres,mcp,google,rag]"' in DOCKERFILE
+
+
+def test_rag_extras_appear_in_the_lockfile():
+    """Phase 9 Part C: the class of gap this whole file exists to catch,
+    applied to the new extra — pyproject.toml declaring `rag` means nothing
+    if `infra/requirements.lock.txt` (what the runtime stage actually
+    installs from) doesn't carry its packages too."""
+    text = LOCKFILE.read_text(encoding="utf-8").lower()
+    assert "pypdf==" in text
+    assert "python-docx==" in text
 
 
 def test_lockfile_exists_and_is_non_empty():

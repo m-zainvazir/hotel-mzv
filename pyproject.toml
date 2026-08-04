@@ -58,6 +58,13 @@ google = [
 # test). Invisible on this dev box (mcp 1.28.1 was already installed before
 # 2.0.0 existed); CI's fresh install had no such history.
 mcp = ["langchain-mcp-adapters>=0.3", "mcp<2.0"]
+# Per-bot knowledge base document extraction (Phase 9 Part C). `.md`/`.txt`/
+# `.csv`/HTML need nothing extra (stdlib); this extra is only for `.pdf`
+# (pypdf) and `.docx` (python-docx, which pulls in `lxml`). Embeddings
+# themselves need no SDK — app/rag/embeddings.py is raw httpx, matching the
+# "raw httpx, no SDKs" precedent (plan §10 amendment) — so this extra is
+# narrowly about file parsing, not the RAG pipeline as a whole.
+rag = ["pypdf>=5.0", "python-docx>=1.1"]
 # Durable conversation memory (Phase 4 Step 7). Optional and self-degrading:
 # app/brain/graph.py falls back to InMemorySaver with a WARNING if this
 # isn't installed, so a blocked compiled DLL (see the uuid_utils gotcha

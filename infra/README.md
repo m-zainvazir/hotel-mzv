@@ -98,6 +98,64 @@ be avoided.
 6. Set `APP_ENV=production` — this is what turns on the preflight in step
    above; every secret must be real at this point.
 
+## Removing a bot (Phase 9 Part B)
+
+Two operations, deliberately different in cost — see `plans/phase9.md`
+Risk 5 for the full reasoning.
+
+**Archive** (`/admin` → tenant → Config tab → Danger Zone → Archive, or
+`POST /admin/api/tenants/{id}/archive`) is a pure `status: "archived"` flip.
+Every row survives. `resolve_tenant_id` (`app/tenancy/loader.py`) refuses to
+serve an archived tenant on any channel — a Vapi call or a widget handshake
+gets a clean refusal instead of an answer — but nothing is deleted, and
+**Restore** undoes it instantly.
+
+**Purge** (Danger Zone → type the tenant id to confirm → Purge permanently,
+or `POST /admin/api/tenants/{id}/purge` with `{"tenant_id": "<same id>"}` as
+body confirmation) is irreversible. Refused unless the tenant is already
+archived. Deletes, in this exact FK order (`app/tenancy/admin.py::_PURGE_TABLES`
+— most of these tables have no `on delete cascade` from `tenants`, so this
+order is load-bearing, not stylistic):
+
+```
+chat_messages → chat_sessions → escalations → messages → jobs → calls
+→ services → mcp_servers → voice_consents → tenants
+```
+
+Then, best-effort (logged on failure, never aborting the row deletion above
+since that's already irreversible by that point): every Vault secret this
+tenant has, the Vapi assistant if one was ever provisioned, and a committed
+`content/tenants/<id>.json` if one exists. **Purge destroys every call
+transcript and chat transcript for that tenant along with everything
+else** — there is no separate export step, so pull anything worth keeping
+(`GET /admin/api/tenants/{id}/calls/{call_id}`, `.../chats/{session_id}`)
+before confirming.
+
+**Manual SQL fallback**, if the panel is unavailable — run as the same
+sequence, against the Supabase SQL editor or `psql`, substituting the real
+tenant id:
+
+```sql
+delete from public.chat_messages where tenant_id = '<id>';
+delete from public.chat_sessions where tenant_id = '<id>';
+delete from public.escalations   where tenant_id = '<id>';
+delete from public.messages      where tenant_id = '<id>';
+delete from public.jobs          where tenant_id = '<id>';
+delete from public.calls         where tenant_id = '<id>';
+delete from public.services      where tenant_id = '<id>';
+delete from public.mcp_servers   where tenant_id = '<id>';
+delete from public.voice_consents where tenant_id = '<id>';
+delete from public.tenants       where tenant_id = '<id>';
+select public.delete_tenant_secrets('<id>');  -- Vault cleanup (0010_lifecycle.sql)
+```
+
+This bypasses the archived-status precondition and the typed confirmation —
+both are panel/API-layer guards, not database constraints — so treat the
+manual path with the same care the panel's confirmation step exists to
+enforce. It does **not** delete the Vapi assistant or the committed JSON
+file; do both by hand (`VapiClient.delete_assistant` /
+`rm content/tenants/<id>.json` + a commit) if they exist.
+
 ## Process model — one worker, one replica, not a placeholder default
 
 Three pieces of state are process-local with no cross-process sharing:

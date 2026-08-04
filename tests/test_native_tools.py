@@ -22,7 +22,11 @@ def _offered_starts(result: str, tz):
 
 
 def test_critical_path_tools_are_all_native():
-    """CLAUDE.md convention #2 — these five are tier 1, not MCP."""
+    """CLAUDE.md convention #2 — these five are tier 1, not MCP. Unchanged by
+    Phase 9 Part C: `search_knowledge` is a sixth native tool, but a
+    *conditional* one (bound only for tenants with a knowledge base, via
+    `native_tools_for` — see test_knowledge_tool.py), never part of this
+    fixed, unconditional five."""
     assert {t.name for t in NATIVE_TOOLS} == {
         "check_availability",
         "book_job",
@@ -30,7 +34,7 @@ def test_critical_path_tools_are_all_native():
         "escalate",
         "is_emergency",
     }
-    assert SLOW_TOOLS <= {t.name for t in NATIVE_TOOLS}
+    assert SLOW_TOOLS <= {t.name for t in NATIVE_TOOLS} | {"search_knowledge"}
 
 
 async def test_check_availability_returns_bookable_slots(hotel):

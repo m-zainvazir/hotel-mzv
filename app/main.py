@@ -79,6 +79,7 @@ from app.middleware import RequestContextMiddleware
 from app.preflight import verify_production_settings
 from app.tenancy.loader import get_repository, set_repository
 from app.tenancy.supabase_repository import SupabaseTenantRepository
+from app.tools.booking.mcp_calcom import aclose_calcom_mcp_sessions
 from app.tools.http_client import close_shared_clients
 
 # At import time, not inside `lifespan`: uvicorn's own `Config.configure_logging()`
@@ -160,6 +161,9 @@ async def lifespan(app: FastAPI):
             await tenant_refresh_task
     # Close pooled connections to Cal.com/Twilio/etc cleanly (app/tools/http_client.py).
     await close_shared_clients()
+    # Close any cached Cal.com MCP sessions cleanly too — same reasoning,
+    # separate cache (app/tools/booking/mcp_calcom.py).
+    await aclose_calcom_mcp_sessions()
     await close_postgres_pool()
 
 
@@ -244,6 +248,7 @@ async def health(authenticated: bool = Depends(is_ops_caller)) -> dict:
     widget_built = WIDGET_BUNDLE_PATH.is_file()
     admin_built = ADMIN_INDEX_PATH.is_file()
     mcp_status = _mcp_health(settings)
+    knowledge_status = _knowledge_health(settings)
 
     problems: list[str] = []
     if settings.database_url and checkpointer == "memory":
@@ -264,6 +269,8 @@ async def health(authenticated: bool = Depends(is_ops_caller)) -> dict:
         problems.append("admin bundle not built")
     if mcp_status == "unavailable":
         problems.append("mcp is enabled but langchain-mcp-adapters is not installed")
+    if knowledge_status == "unavailable":
+        problems.append("knowledge is enabled but SUPABASE_URL is unset")
     repository = get_repository()
     if settings.tenant_source == "supabase" and getattr(repository, "degraded", False):
         # The phantom-edit mirror image: an edit landed in Supabase, the
@@ -282,6 +289,7 @@ async def health(authenticated: bool = Depends(is_ops_caller)) -> dict:
         "widget": "built" if widget_built else "missing",
         "admin": "built" if admin_built else "missing",
         "mcp": mcp_status,
+        "knowledge": knowledge_status,
         "problems": problems,
     }
     # env / llm_provider / model / the full tenant roster are operational
@@ -331,6 +339,18 @@ def _mcp_health(settings) -> str:
     except ImportError:
         return "unavailable"
     return settings.mcp_source
+
+
+def _knowledge_health(settings) -> str:
+    """`"off"` / `"ready"` / `"unavailable"` (Phase 9 Part C). `knowledge_source`
+    is `Literal["supabase"]` — there's no in-memory vector store for
+    production the way `store`/`checkpointer` have one, so `KNOWLEDGE_ENABLED=true`
+    with no `SUPABASE_URL` can never actually serve retrieval."""
+    if not settings.knowledge_enabled:
+        return "off"
+    if not settings.supabase_url:
+        return "unavailable"
+    return "ready"
 
 
 # --- serving the admin UI (Phase 8) -----------------------------------------

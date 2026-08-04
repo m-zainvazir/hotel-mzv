@@ -24,6 +24,7 @@ the identical code path an operator's do.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -34,6 +35,10 @@ from app.tenancy.models import TenantConfig
 from app.tenancy.repository import TenantNotFoundError, TenantRepository
 
 logger = logging.getLogger(__name__)
+
+#: Pause between the two snapshot attempts. Short on purpose — this sits in
+#: `lifespan`, so every second here is a second before the app serves traffic.
+_RETRY_DELAY_SECONDS = 0.5
 
 
 class SupabaseTenantRepository:
@@ -66,6 +71,24 @@ class SupabaseTenantRepository:
 
     # --- loading -------------------------------------------------------
 
+    async def _fetch_rows(self, client: httpx.AsyncClient) -> Any:
+        """One attempt at the registry query. Raises; the caller decides."""
+        # select=*,services(*) is the embedded-resource join: `services`
+        # is one of `_TENANT_COLUMNS` in app/tenancy/sync.py (so it never
+        # lands in the `config` JSONB blob), but there is no `services`
+        # column on `public.tenants` either — it only ever lived in
+        # `public.services`, joined via the FK PostgREST detects
+        # automatically (0001_schema.sql). Verified live: the embed name
+        # resolves as "services" on the real project.
+        response = await client.get(
+            "/tenants", params={"select": "*,services(*)", "order": "tenant_id.asc"}
+        )
+        if response.status_code >= 400:
+            raise SupabaseTenantLoadError(
+                f"GET /tenants -> {response.status_code}: {response.text[:300]}"
+            )
+        return response.json() if response.content else []
+
     async def refresh(self) -> None:
         """(Re)load every tenant. Never raises — see the class docstring."""
         settings = get_settings()
@@ -88,28 +111,54 @@ class SupabaseTenantRepository:
                 "apikey": settings.supabase_secret_key,
                 "Authorization": f"Bearer {settings.supabase_secret_key}",
             },
-            timeout=settings.supabase_timeout_seconds,
+            timeout=settings.tenant_snapshot_timeout_seconds,
         )
         try:
-            # select=*,services(*) is the embedded-resource join: `services`
-            # is one of `_TENANT_COLUMNS` in app/tenancy/sync.py (so it never
-            # lands in the `config` JSONB blob), but there is no `services`
-            # column on `public.tenants` either — it only ever lived in
-            # `public.services`, joined via the FK PostgREST detects
-            # automatically (0001_schema.sql). ⚠️ VERIFY the embed name
-            # resolves as "services" on the live project.
-            response = await client.get(
-                "/tenants", params={"select": "*,services(*)", "order": "tenant_id.asc"}
-            )
-            if response.status_code >= 400:
-                raise SupabaseTenantLoadError(
-                    f"GET /tenants -> {response.status_code}: {response.text[:300]}"
+            try:
+                rows = await self._fetch_rows(client)
+            except httpx.HTTPError as exc:
+                # Retry ONLY a transport-level failure, and only once. The
+                # observed failure is a cold-start timeout: the first HTTPS
+                # call of a fresh process pays DNS + TLS on top of the query,
+                # and losing that race silently serves the JSON fallback for a
+                # whole refresh interval. A second attempt reuses the
+                # connection the first one just opened, so it is both cheap
+                # and much more likely to succeed.
+                #
+                # A SupabaseTenantLoadError is deliberately NOT retried: that
+                # means the server answered with a 4xx/5xx (a bad key, a
+                # missing table, a broken embed), which a retry cannot fix and
+                # which would only double the boot delay before the same
+                # failure.
+                logger.warning(
+                    "tenant snapshot attempt 1 failed (%s: %s) — retrying once",
+                    type(exc).__name__,
+                    exc,
                 )
-            rows = response.json() if response.content else []
-        except (httpx.HTTPError, SupabaseTenantLoadError) as exc:
-            logger.error("SupabaseTenantRepository.refresh() failed wholesale: %s", exc)
-            self.degraded = True
-            return
+                try:
+                    await asyncio.sleep(_RETRY_DELAY_SECONDS)
+                    rows = await self._fetch_rows(client)
+                except (httpx.HTTPError, SupabaseTenantLoadError) as retry_exc:
+                    # Log the exception TYPE, not just str(exc): httpx timeout
+                    # exceptions stringify to the empty string, so the original
+                    # "failed wholesale: " line named nothing at all.
+                    logger.error(
+                        "SupabaseTenantRepository.refresh() failed wholesale "
+                        "(%s: %s) — serving the JSON fallback",
+                        type(retry_exc).__name__,
+                        retry_exc,
+                    )
+                    self.degraded = True
+                    return
+            except SupabaseTenantLoadError as exc:
+                logger.error(
+                    "SupabaseTenantRepository.refresh() failed wholesale (%s: %s) — "
+                    "serving the JSON fallback",
+                    type(exc).__name__,
+                    exc,
+                )
+                self.degraded = True
+                return
         finally:
             if owns_client:
                 await client.aclose()

@@ -8,7 +8,7 @@ rather than only after Phase 4.
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from functools import lru_cache
 from threading import RLock
 
@@ -21,6 +21,9 @@ from app.db.models import (
     Escalation,
     Job,
     JobStatus,
+    KnowledgeChunk,
+    KnowledgeDocument,
+    KnowledgeHit,
     OutboundMessage,
     TenantMetrics,
 )
@@ -37,6 +40,8 @@ class InMemoryStore:
         self._calls: dict[str, dict[str, Call]] = defaultdict(dict)
         self._chat_sessions: dict[str, dict[str, ChatSession]] = defaultdict(dict)
         self._chat_messages: dict[str, list[ChatMessage]] = defaultdict(list)
+        self._knowledge_documents: dict[str, dict[str, KnowledgeDocument]] = defaultdict(dict)
+        self._knowledge_chunks: dict[str, dict[str, KnowledgeChunk]] = defaultdict(dict)
 
     # --- jobs --------------------------------------------------------------
 
@@ -316,6 +321,135 @@ class InMemoryStore:
     async def aget_call(self, tenant_id: str, call_id: str) -> Call | None:
         return self.get_call(tenant_id, call_id)
 
+    # --- knowledge base / RAG (Phase 9 Part C) ------------------------------
+    #
+    # Pure-Python cosine similarity, not numpy: numpy isn't in this project's
+    # dependency tree and would add ~20MB to the deploy image just for the
+    # in-memory dev/test store — see _cosine_similarity below.
+
+    def add_document(self, document: KnowledgeDocument) -> KnowledgeDocument:
+        with self._lock:
+            self._knowledge_documents[document.tenant_id][document.id] = document
+        return document
+
+    async def aadd_document(self, document: KnowledgeDocument) -> KnowledgeDocument:
+        return self.add_document(document)
+
+    def list_documents(self, tenant_id: str) -> list[KnowledgeDocument]:
+        with self._lock:
+            docs = list(self._knowledge_documents[tenant_id].values())
+        return sorted(docs, key=lambda d: d.created_at, reverse=True)
+
+    async def alist_documents(self, tenant_id: str) -> list[KnowledgeDocument]:
+        return self.list_documents(tenant_id)
+
+    def get_document(self, tenant_id: str, document_id: str) -> KnowledgeDocument | None:
+        with self._lock:
+            return self._knowledge_documents[tenant_id].get(document_id)
+
+    async def aget_document(self, tenant_id: str, document_id: str) -> KnowledgeDocument | None:
+        return self.get_document(tenant_id, document_id)
+
+    def delete_document(self, tenant_id: str, document_id: str) -> None:
+        with self._lock:
+            self._knowledge_documents[tenant_id].pop(document_id, None)
+            chunks = self._knowledge_chunks[tenant_id]
+            for chunk_id in [cid for cid, c in chunks.items() if c.document_id == document_id]:
+                del chunks[chunk_id]
+
+    async def adelete_document(self, tenant_id: str, document_id: str) -> None:
+        self.delete_document(tenant_id, document_id)
+
+    def set_document_status(
+        self,
+        tenant_id: str,
+        document_id: str,
+        *,
+        status: str,
+        error: str | None = None,
+        chunk_count: int | None = None,
+    ) -> KnowledgeDocument:
+        with self._lock:
+            doc = self._knowledge_documents[tenant_id].get(document_id)
+            if doc is None:
+                raise KeyError(f"knowledge document {document_id} not found for tenant {tenant_id}")
+            # `error` is always overwritten (defaulting to None), not merged
+            # — a status update the caller doesn't attach a fresh error to
+            # should clear any stale one from a prior failed attempt.
+            updates: dict[str, object] = {"status": status, "error": error}
+            if chunk_count is not None:
+                updates["chunk_count"] = chunk_count
+            if status == "ready":
+                updates["indexed_at"] = datetime.now(UTC)
+            doc = doc.model_copy(update=updates)
+            self._knowledge_documents[tenant_id][document_id] = doc
+        return doc
+
+    async def aset_document_status(
+        self,
+        tenant_id: str,
+        document_id: str,
+        *,
+        status: str,
+        error: str | None = None,
+        chunk_count: int | None = None,
+    ) -> KnowledgeDocument:
+        return self.set_document_status(
+            tenant_id, document_id, status=status, error=error, chunk_count=chunk_count
+        )
+
+    def upsert_chunks(self, tenant_id: str, chunks: list[KnowledgeChunk]) -> None:
+        with self._lock:
+            for chunk in chunks:
+                self._knowledge_chunks[tenant_id][chunk.id] = chunk
+
+    async def aupsert_chunks(self, tenant_id: str, chunks: list[KnowledgeChunk]) -> None:
+        self.upsert_chunks(tenant_id, chunks)
+
+    def search_chunks(
+        self,
+        tenant_id: str,
+        *,
+        query_embedding: list[float],
+        top_k: int,
+        min_similarity: float,
+    ) -> list[KnowledgeHit]:
+        with self._lock:
+            chunks = list(self._knowledge_chunks[tenant_id].values())
+            docs = dict(self._knowledge_documents[tenant_id])
+
+        hits: list[KnowledgeHit] = []
+        for chunk in chunks:
+            if chunk.embedding is None:
+                continue
+            similarity = _cosine_similarity(query_embedding, chunk.embedding)
+            if similarity < min_similarity:
+                continue
+            doc = docs.get(chunk.document_id)
+            hits.append(
+                KnowledgeHit(
+                    chunk_id=chunk.id,
+                    document_id=chunk.document_id,
+                    document_title=doc.title if doc else "",
+                    content=chunk.content,
+                    similarity=similarity,
+                )
+            )
+        hits.sort(key=lambda h: h.similarity, reverse=True)
+        return hits[:top_k]
+
+    async def asearch_chunks(
+        self,
+        tenant_id: str,
+        *,
+        query_embedding: list[float],
+        top_k: int,
+        min_similarity: float,
+    ) -> list[KnowledgeHit]:
+        return self.search_chunks(
+            tenant_id, query_embedding=query_embedding, top_k=top_k, min_similarity=min_similarity
+        )
+
     # --- test helper -------------------------------------------------------
 
     def reset(self) -> None:
@@ -326,6 +460,8 @@ class InMemoryStore:
             self._calls.clear()
             self._chat_sessions.clear()
             self._chat_messages.clear()
+            self._knowledge_documents.clear()
+            self._knowledge_chunks.clear()
 
 
 def _call_summary(call: Call) -> CallSummary:
@@ -343,6 +479,20 @@ def _call_summary(call: Call) -> CallSummary:
         channel=call.channel,
         created_at=call.created_at,
     )
+
+
+def _cosine_similarity(a: list[float], b: list[float]) -> float:
+    """Stdlib cosine similarity — the whole reason this exists instead of
+    `numpy.dot`/`numpy.linalg.norm` is that numpy isn't in this project's
+    dependency tree (see the class docstring above this method's caller)."""
+    if not a or not b or len(a) != len(b):
+        return 0.0
+    dot = sum(x * y for x, y in zip(a, b, strict=True))
+    norm_a = sum(x * x for x in a) ** 0.5
+    norm_b = sum(y * y for y in b) ** 0.5
+    if norm_a == 0.0 or norm_b == 0.0:
+        return 0.0
+    return dot / (norm_a * norm_b)
 
 
 @lru_cache(maxsize=1)
