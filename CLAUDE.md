@@ -848,12 +848,45 @@ now naming 9.3).
   a `javascript:` URL and an off-allowlist host are both dropped while a
   catalog button survives; a voice-channel postback is ignored; a stale
   postback falls through to the model; and voice binds exactly the fixed
-  five and nothing else. **Not yet done:** any live verification at all —
-  no browser click-through, no real flow rendered against the real Supabase
-  project, no real card carousel, and in particular **no evidence yet of how
-  reliably the live model actually calls `offer_actions` unprompted** —
-  that's a prompt-quality question offline tests structurally cannot answer,
-  since the scripted model does whatever the test tells it to.
+  five and nothing else.
+
+**Deployed to Railway and live-verified in production (2026-08-07).** Pushed
+to GitHub (`m-zainvazir/hotel-mzv`, **public** — see the botsify/ note in
+.gitignore) which autodeploys. Confirmed against the production URL:
+`/health` clean with `store: supabase` + `checkpointer: postgres`, `/readyz`
+touches the real database, the new `/bot/{widget_key}` share page serves,
+and a real chat turn emitted **`cards` + `actions`** — so model-authored
+buttons and the card carousel work in production, not just locally.
+`TENANT_SOURCE=supabase` is confirmed *empirically*: production serves
+`playmouth2`, a tenant that exists only in Supabase and has no
+`content/tenants/*.json` file at all. That closes Phase 9.1's last
+deployment item.
+
+**What is live-verified, and what still isn't:**
+
+- ✅ **9.1**: migration 0012; draft → deploy → live on the next turn; the
+  Versions tab end to end (revert changed the *running* bot's greeting on
+  the next request, the Deployed badge moved, deleting a non-live version
+  worked and deleting the deployed one 409'd — proven on a throwaway tenant
+  that was then archived and purged); Test Agent + Preview draft links;
+  `offer_actions` buttons; the Railway switch.
+- ✅ **9.2**: card carousel, model-authored buttons/quick replies, the
+  opening turn, the public share link.
+- ❌ **The entire deterministic flow engine has never run live** — `flows`,
+  `start_flow`, `flow:` postbacks, `chat.menu_flow`, and the checkpointer
+  write-back. Offline tests use an in-memory checkpointer, so the "next turn
+  remembers the flow" guarantee is unproven against real Postgres. This is
+  the largest outstanding gap in either phase.
+- ❌ Channel flags, `handoff` → a real `escalate`, and `ui.allowed_hosts` /
+  scheme rejection are all offline-only.
+- ⚠️ **A known live quality issue:** the model frequently restates itself
+  across a tool hop ("I can check with a bookseller…" twice). Scoping the
+  "speak before acting" rule away from the instant presentation tools cut it
+  from ~4/5 turns to ~1/3, but it is not solved. `RepeatSuppressor` only
+  guards the *first* sentence of a segment, which structurally cannot catch
+  a restatement that appears later in it.
+- ⏸️ `prompt_augmentation` still ships both behaviours pending a decision —
+  say "lock prompt augmentation to auto_append/placeholder_only".
 
 ## Gotchas learned the hard way
 - **`/widget.js` must send `Cache-Control: no-cache`, never `immutable`.**
