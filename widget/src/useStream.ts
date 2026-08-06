@@ -3,17 +3,19 @@
 // of this widget most worth getting right, per plan §7.
 //
 // Server-side event types: token, acknowledgement, suggestions, handoff,
-// final, error (app/brain/runner.py's EventType). `_events()` also emits a
-// bare `: ping` comment line as a heartbeat; any line that doesn't start
-// with `data: ` (including that one) is simply not yielded here — that's
-// what makes heartbeats a no-op for the reader rather than something it has
-// to specially handle.
+// actions, cards, final, error (app/brain/events.py's EventType). `_events()` also
+// emits a bare `: ping` comment line as a heartbeat; any line that doesn't
+// start with `data: ` (including that one) is simply not yielded here —
+// that's what makes heartbeats a no-op for the reader rather than something
+// it has to specially handle.
 
 export type BrainEventType =
   | "token"
   | "acknowledgement"
   | "suggestions"
   | "handoff"
+  | "actions"
+  | "cards"
   | "final"
   | "error";
 

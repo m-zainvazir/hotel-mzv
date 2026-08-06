@@ -30,6 +30,18 @@ class TenantArchivedError(TenantNotFoundError):
     """
 
 
+class ChannelDisabledError(TenantNotFoundError):
+    """Raised when a tenant resolves fine but has disabled the channel
+    being used (`TenantConfig.channels`, Phase 9.1) — e.g. a chat handshake
+    against a voice-only bot. Same subclassing trick as `TenantArchivedError`
+    above, for the same reason: every existing `except TenantNotFoundError`
+    handler already refuses cleanly with no code change. Raised by
+    `app/tenancy/loader.py::require_channel_enabled`, not by
+    `resolve_tenant_id` itself — that function has no `channel` argument, so
+    it can't know which channel to check.
+    """
+
+
 @runtime_checkable
 class TenantRepository(Protocol):
     def get(self, tenant_id: str) -> TenantConfig: ...

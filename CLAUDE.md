@@ -20,7 +20,7 @@ A multi-tenant AI receptionist: one LangGraph "brain" that serves both **phone**
 
 ## Non-negotiable conventions
 1. **Stream everything.** The graph emits tokens as Groq produces them. The first spoken response must **never** wait on a tool call — acknowledge, then act.
-2. **Two tool tiers.** Critical path (`check_availability`, `book_job`, `send_confirmation`, `escalate`, `is_emergency`) = native, typed, validated tools. Long-tail integrations (Sheets, scrapers, CRM) = MCP.
+2. **Two tool tiers.** Critical path (`check_availability`, `book_job`, `send_confirmation`, `escalate`, `is_emergency`) = native, typed, validated tools. Long-tail integrations (Sheets, scrapers, CRM) = MCP. *Conditional* native tools (`search_knowledge`, `offer_actions`, `start_flow`, `offer_cards`) sit inside tier 1 but are bound only for tenants that configured them — see `native_tools_for`, and `ALL_NATIVE_TOOLS` for why the distinction is load-bearing.
 3. **Tenant isolation.** Every table and every query carries `tenant_id`; enforce Supabase RLS as defense-in-depth. One tenant must never see another's data, MCP servers, or secrets.
 4. **Provider-agnostic brain.** No vendor-specific logic in graph nodes. Swapping Vapi→Retell, Groq→OpenAI, or Google Calendar→Cal.com must not touch the graph.
 5. **Secrets** live in env vars / Supabase Vault, never in code. Per-tenant credentials are encrypted.
@@ -734,7 +734,196 @@ live-verified: a real ingestion (paste/upload/crawl → embed → store) and a
 real `search_knowledge` retrieval through the running app — the schema is
 now real, the pipeline against it still isn't proven end to end.
 
+**Phase 9.2 (deterministic flows, rich buttons, generic-template cards) is
+code-complete and offline-tested — see `plans/phase9.2.md`. Not yet
+live-verified.** The 9.2 slot was reassigned by client decision: the *voice
+tester* 9.1 earmarked for it moves to **Phase 9.3**, unchanged in design
+(`plans/phase9.1.md`'s preview section carries a renumbering note, and
+`app/main.py::_resolve_test_mode` still mints-and-rejects `mode="voice"`,
+now naming 9.3).
+
+- **A real flow engine, not LLM re-entry.** `app/flows/` (resolver, render,
+  cards) turns a `TenantConfig.flows` node — fixed `say` text plus button
+  slugs — into `BrainEvent`s with **no model request at all**.
+  `stream_turn` gained a `postback` parameter (`flow:<id>`, from
+  `ChatRequest.postback`) and short-circuits into it *after* the
+  draft-preview override resolves (so a "Preview draft" session navigates
+  the draft's flows) and *before* the graph. This is the feature most
+  tempted to live in a channel adapter; it deliberately doesn't
+  (CLAUDE.md's own convention), which is what lets a flow turn inherit rate
+  limiting, transcript persistence, the channel-enabled check and the draft
+  override without reimplementing any of them.
+- **Termination is a graph edge, not a prompt instruction.** `start_flow`
+  (the model's way *into* a flow when someone types free text instead of
+  clicking) returns a `kind: "flow"` artifact, and `app/brain/graph.py`'s
+  new `_after_tools` conditional edge routes that to `END` instead of back
+  to `reason`. The `tools → reason` edge had been unconditional since Phase
+  1. This exists because "show exactly this text and these buttons, then
+  STOP" is a request a model honours *most* of the time — the reference
+  prompt that prompted this phase attempts it four separate times in
+  capitals ("END OF TURN RULE", "STRICT TERMINATION RULE"). A scripted node
+  that sometimes gets a chatty sentence bolted on is not deterministic in
+  any useful sense.
+- **Buttons and cards are model-authored and need NO configuration — this
+  is the headline, and it reversed a Phase 9.1 invariant on purpose.**
+  `offer_actions` originally took catalog `slugs`, which meant a bot could
+  only ever offer buttons an operator had already typed into config; no
+  prompt wording could produce one. The project's actual premise is the
+  opposite ("the only input from my side should be an AI prompt"), so the
+  tool now takes `{label, url}` / `{label, reply}` specs as well as
+  `{slug}`, and `native_tools_for` binds it **and** `offer_cards`
+  unconditionally on chat. `ui.buttons`/`ui.cards` are kill switches read
+  *inside* the tools, not binding gates, so a tool schema can never vanish
+  mid-conversation.
+- **Losing the slug indirection is a real security trade-off, taken
+  knowingly.** It was what guaranteed a URL from a poisoned knowledge chunk
+  or a hostile tool result could never become a clickable `<a href>` on a
+  *client's own* website. What replaces it is `app/flows/urls.py` — one
+  shared validator, `http(s)` schemes only, plus an optional per-tenant
+  `ui.allowed_hosts` (empty by default, since a bot that can only link
+  where an operator pre-approved is also a bot that can't link to something
+  useful it found). A button naming a catalog slug skips the allowlist:
+  it constrains the model, never the operator. The widget validates nothing
+  and assumes nothing — one validator beats two that can disagree.
+- **The shared `${ui_rule}` prompt section is the other half.** Binding the
+  tools is useless if the model isn't told they exist, and a prompt pasted
+  in from another platform never mentions them. `_UI_RULE`
+  (`app/brain/prompts/system.py`) is a fixed "How this chat looks" briefing
+  — offer buttons instead of asking open questions, never paste a URL, use
+  `reply` buttons for menus, use cards for lists with pictures — rendered
+  into `content/system-prompt.md` via `${ui_rule}` *and* auto-appended to
+  every override by `_augment`. Chat only: neither tool is bound on voice,
+  so describing them there would invite a call to something that doesn't
+  exist.
+- **`ui.opening_turn` (on by default) exists because a model can't produce
+  buttons without a turn to produce them in.** The greeting is static config
+  text with no model involved, so a prompt-authored opening menu was
+  impossible. When on, the widget runs one real turn as the panel opens and
+  suppresses the static greeting bubble — matching how Botsify's first
+  message actually works. Costs one LLM request per visitor who opens the
+  widget, including those who never type, so `start_session` suppresses it
+  whenever a configured `chat.menu_flow` exists (that renders instantly and
+  free — there'd be nothing to buy).
+- **One catalog, four render targets — still true, now as the *precision*
+  path rather than the only one.** `TenantLink` gained `reply` and `flow`
+  types (plus `value`/`flow` fields) and remains the single source of truth
+  for anything an operator wants pinned exactly, resolved in one place
+  (`app/flows/resolver.py::resolve_buttons`). `flow` buttons in particular
+  cannot be model-authored by definition — a scripted node is something an
+  operator declared.
+- **`prompt_augmentation` exists because a pasted prompt has no
+  `${links}`.** An operator pasting a script written for another platform
+  gets a complete, well-written prompt containing none of the new
+  placeholders — so the model would never learn its buttons exist, for
+  exactly the bots most likely to have some. `auto_append` (the default)
+  appends any section the *rendered* prompt is missing; `placeholder_only`
+  never touches the text. Both ship, switchable per tenant, pending a
+  client decision on which to keep — the admin AI Prompt tab shows a
+  warning banner either way.
+- **No migration.** `links`, `flows`, `cards` and `prompt_augmentation` all
+  ride inside the `config` JSONB (outside `_TENANT_COLUMNS`,
+  `app/tenancy/sync.py`), exactly as Phase 9.1's `links` note predicted —
+  so `sync.py`, `supabase_repository.py` and the whole draft/deploy/version
+  path needed zero changes.
+- **A real pre-existing bug this phase surfaced and fixed:** `is_slow_tool`
+  inverted its rule as "anything not in the fixed five `NATIVE_TOOLS` is
+  slow" — correct for MCP tools (the case it was written for), wrong for
+  every *conditional native* one. `offer_actions` had therefore been
+  triggering a spoken "bear with me a second…" before an instant in-memory
+  dict lookup since Phase 9.1, with its own docstring in `registry.py`
+  asserting the opposite. Merely cosmetic in chat; on a flow node it would
+  have prefixed a deterministic node's configured wording with a model-ish
+  filler phrase — the exact thing the feature promises can't happen, which
+  is how the test caught it. Fixed with a new `ALL_NATIVE_TOOLS` constant;
+  `NATIVE_TOOLS` stays frozen at five so
+  `test_critical_path_tools_are_all_native` keeps its meaning.
+- **963 tests offline** (23 in `test_flows.py`, 11 in `test_flow_tools.py`,
+  28 in `test_card_tools.py`, 34 in `test_action_tools.py`, plus
+  `test_system_prompt.py`). The load-bearing ones: a flow turn makes
+  **zero** LLM requests; a flow turn is visible to the *next* free-text turn
+  (proven by disabling `_remember` and watching it fail, not by assuming);
+  `start_flow` genuinely ends the graph; a bot with **no configuration at
+  all** binds `offer_actions`/`offer_cards`, gets `${ui_rule}` in its
+  prompt, and renders a model-composed button end to end through `/chat`;
+  a `javascript:` URL and an off-allowlist host are both dropped while a
+  catalog button survives; a voice-channel postback is ignored; a stale
+  postback falls through to the model; and voice binds exactly the fixed
+  five and nothing else. **Not yet done:** any live verification at all —
+  no browser click-through, no real flow rendered against the real Supabase
+  project, no real card carousel, and in particular **no evidence yet of how
+  reliably the live model actually calls `offer_actions` unprompted** —
+  that's a prompt-quality question offline tests structurally cannot answer,
+  since the scripted model does whatever the test tells it to.
+
 ## Gotchas learned the hard way
+- **`/widget.js` must send `Cache-Control: no-cache`, never `immutable`.**
+  It shipped as `public, max-age=31536000, immutable` from Phase 5 — the
+  correct header for a content-hashed filename, and exactly wrong for this
+  one. `/widget.js` *is* the frozen embed contract (widget/README.md), so
+  the URL can never gain a hash: the path is fixed forever while the bytes
+  change on every build. `immutable` tells a browser not to revalidate even
+  on a normal reload, so a client site that loaded the widget once would
+  serve that build for up to a year and any widget fix would reach nobody.
+  The ETag (the build hash) was already correct and simply never used,
+  because `immutable` means the conditional request is never sent. Found
+  live: the Phase 9.2 card carousel appeared to "not render", with the
+  server demonstrably emitting valid `cards` events and the built bundle
+  demonstrably containing the component — the browser was running a
+  months-old bundle. `no-cache` means "cache, but revalidate every time",
+  so an unchanged bundle is a bodyless 304. Guarded by
+  `test_api.py::test_the_widget_bundle_is_revalidated_never_cached_immutably`.
+  Fixing the header is necessary but **not sufficient**: it does nothing for
+  a copy already cached as `immutable`, which a browser will keep serving
+  without asking. The Test Agent page therefore also renders
+  `<script src="/widget.js?v={buildhash}">` (`app/main.py::_widget_build_id`)
+  — a real client embed can't carry a query (the bare tag is the frozen
+  contract) but that page is server-rendered on every load, so a changed
+  bundle is a changed URL and an already-poisoned cache entry is bypassed.
+- **Two debugging lessons from the above, both of which cost real time:**
+  1. **"The UI doesn't show X" is not evidence the UI is wrong.** Server,
+     SSE frame, stream parser, compiled event handler, render condition,
+     component output and injected CSS were each verified correct in
+     isolation before the actual cause was found. When every layer checks
+     out, suspect what's *running* rather than what's *written*.
+  2. **A request in the access log is not necessarily the user's.** A
+     `GET /widget.js 200` was read as the browser fetching a fresh bundle
+     when it was this session's own `curl`. The real signal was the
+     *absence* of a request beside the page load. When reasoning from logs
+     during a live debugging session, account for your own traffic first.
+  A jsdom probe (mount the real `App`, mock `fetch` with a captured SSE
+  body, drive the form) settles "is the widget code correct?" in one run
+  without needing a browser at all — worth reaching for early next time.
+- **A wrong return type in `admin/src/api.ts` silently disables the only
+  guard that exists for the admin panel's wire contract.** Found live on the
+  first real click-through of "New bot" (the one CLAUDE.md had flagged as
+  owed since Phase 9 Part B): the bot was created correctly, then the panel
+  navigated to `/tenants/undefined` and showed "no tenant config for
+  'undefined'". `createTenant` was typed `Promise<TenantConfig>` — true when
+  Part B wrote it, false once Phase 9.1 wrapped every lifecycle route in
+  `_tenant_detail(...)` — so `created.tenant_id` compiled fine and was
+  `undefined` at runtime. No Python test can see across the wire into
+  TypeScript, and `tests/test_admin_tenant_crud.py` was *already* asserting
+  the correct `response.json()["config"]` shape, so the server half was
+  never wrong. **`tsc --noEmit` in `npm run build` is the regression guard
+  for this whole class of bug, and an inaccurate annotation is what turns it
+  off.** Verified by reintroducing the bug and watching the build fail with
+  `Property 'tenant_id' does not exist on type 'TenantDetail'`. When a route's
+  response shape changes, grep `admin/src/api.ts` for every function that
+  returns it.
+- **A flow turn bypasses LangGraph, so it must write itself back into the
+  checkpointer.** `app/flows/render.py::_remember` calls `aupdate_state`
+  with a `HumanMessage`/`AIMessage` pair after every scripted node. Omit it
+  and *nothing fails* — no error, no log line; the model simply has amnesia
+  about whatever the visitor clicked through, so "what were those options
+  again?" gets answered from an empty transcript. It's the easiest line in
+  the package to drop and the hardest consequence to notice, which is why
+  `test_flows.py::test_the_flow_turn_is_visible_to_the_next_free_text_turn`
+  exists and was verified to actually fail without it.
+- **The `scripted` fixture calls `reset_graph()`, which throws away the
+  in-memory checkpointer.** Any test spanning two turns that depends on
+  conversation state must script *both* turns in one `scripted(...)` call —
+  a second call between them silently wipes exactly the state under test
+  and the failure looks like a product bug rather than a fixture artifact.
 - **The boot-time tenant snapshot needs its own timeout, not `supabase_timeout_seconds`.**
   Found live during Phase 8 verification: `SupabaseTenantRepository.refresh()` shared the
   8s request-shaped budget, and a cold process — whose first HTTPS call pays DNS + TLS to

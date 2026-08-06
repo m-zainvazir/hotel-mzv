@@ -308,6 +308,28 @@ def admin_client(monkeypatch):
     monkeypatch.setenv("ADMIN_ENABLED", "true")
     monkeypatch.setenv("ADMIN_AUTH_TOKEN", _TOKEN)
     reset_settings_cache()
+
+    # Phase 9.1: `_tenant_detail` (app/channels/admin.py) — used by GET, PUT,
+    # and every lifecycle route — now reads the draft + live-version rows on
+    # every response. Defaulted here to "no draft, no recorded live version"
+    # so a test that doesn't care about drafts/versions doesn't need to know
+    # these calls exist, and (more importantly) doesn't trip `no_network`:
+    # the real functions build a real httpx client the moment
+    # SUPABASE_URL/SUPABASE_SECRET_KEY are set, which `_supabase_configured`
+    # always does in this file.
+    async def _no_draft(tenant_id, *, client=None):
+        return None, None
+
+    async def _no_live_version(tenant_id, *, client=None):
+        return None
+
+    async def _version_v2(tenant_id, *, client=None):
+        return "v2"
+
+    monkeypatch.setattr(admin_module.tenancy_admin, "get_draft", _no_draft)
+    monkeypatch.setattr(admin_module.tenancy_admin, "get_live_version", _no_live_version)
+    monkeypatch.setattr(admin_module.tenancy_admin, "get_tenant_version", _version_v2)
+
     with TestClient(app) as test_client:
         yield test_client
     app.dependency_overrides.pop(require_admin, None)
@@ -315,15 +337,23 @@ def admin_client(monkeypatch):
 
 
 class TestPutTenantRoute:
-    def test_a_valid_edit_succeeds(self, admin_client, monkeypatch):
-        async def _fake_save(config, *, expected_version, client=None):
-            return config
+    """Phase 9.1: PUT writes the DRAFT, never live — `save_draft`, not
+    `save_tenant`. The response nests the effective (draft-or-live) config
+    under `config`, and the always-live one under `live_config`."""
 
-        async def _fake_version(tenant_id, *, client=None):
-            return "v2"
+    def test_a_valid_edit_is_saved_as_a_draft_not_live(self, admin_client, monkeypatch):
+        saved: dict = {}
 
-        monkeypatch.setattr(admin_module.tenancy_admin, "save_tenant", _fake_save)
-        monkeypatch.setattr(admin_module.tenancy_admin, "get_tenant_version", _fake_version)
+        async def _fake_save_draft(config, *, expected_version, client=None):
+            saved["config"] = config
+            saved["expected_version"] = expected_version
+            return "draft-v1"
+
+        async def _fake_get_draft(tenant_id, *, client=None):
+            return (saved.get("config"), "draft-v1" if "config" in saved else None)
+
+        monkeypatch.setattr(admin_module.tenancy_admin, "save_draft", _fake_save_draft)
+        monkeypatch.setattr(admin_module.tenancy_admin, "get_draft", _fake_get_draft)
 
         response = admin_client.put(
             "/admin/api/tenants/hotel-mzv",
@@ -332,23 +362,29 @@ class TestPutTenantRoute:
         )
         assert response.status_code == 200
         body = response.json()
-        assert body["greeting"] == "New greeting text"
-        assert body["_version"] == "v2"
+        assert body["config"]["greeting"] == "New greeting text"
+        assert body["live_config"]["greeting"] != "New greeting text"
+        assert body["has_draft"] is True
+        assert body["_draft_version"] == "draft-v1"
+        assert saved["config"].greeting == "New greeting text"
+        assert saved["expected_version"] is None
 
     def test_a_system_prompt_override_is_saved_and_reflected_in_the_render(
         self, admin_client, monkeypatch
     ):
         """Not an operator-only field (unlike voice_id/mcp_servers) — behaviour
         text, same category as greeting/persona."""
+        saved: dict = {}
 
-        async def _fake_save(config, *, expected_version, client=None):
-            return config
+        async def _fake_save_draft(config, *, expected_version, client=None):
+            saved["config"] = config
+            return "draft-v1"
 
-        async def _fake_version(tenant_id, *, client=None):
-            return "v2"
+        async def _fake_get_draft(tenant_id, *, client=None):
+            return (saved.get("config"), "draft-v1" if "config" in saved else None)
 
-        monkeypatch.setattr(admin_module.tenancy_admin, "save_tenant", _fake_save)
-        monkeypatch.setattr(admin_module.tenancy_admin, "get_tenant_version", _fake_version)
+        monkeypatch.setattr(admin_module.tenancy_admin, "save_draft", _fake_save_draft)
+        monkeypatch.setattr(admin_module.tenancy_admin, "get_draft", _fake_get_draft)
 
         response = admin_client.put(
             "/admin/api/tenants/hotel-mzv",
@@ -357,20 +393,26 @@ class TestPutTenantRoute:
         )
         assert response.status_code == 200
         body = response.json()
-        assert body["system_prompt_override"] == "You are ${business_name}'s custom receptionist."
+        assert (
+            body["config"]["system_prompt_override"]
+            == "You are ${business_name}'s custom receptionist."
+        )
         assert "custom receptionist" in body["_rendered_system_prompt"]
 
     def test_clearing_a_system_prompt_override_falls_back_to_the_shared_default(
         self, admin_client, monkeypatch
     ):
-        async def _fake_save(config, *, expected_version, client=None):
-            return config
+        saved: dict = {}
 
-        async def _fake_version(tenant_id, *, client=None):
-            return "v2"
+        async def _fake_save_draft(config, *, expected_version, client=None):
+            saved["config"] = config
+            return "draft-v1"
 
-        monkeypatch.setattr(admin_module.tenancy_admin, "save_tenant", _fake_save)
-        monkeypatch.setattr(admin_module.tenancy_admin, "get_tenant_version", _fake_version)
+        async def _fake_get_draft(tenant_id, *, client=None):
+            return (saved.get("config"), "draft-v1" if "config" in saved else None)
+
+        monkeypatch.setattr(admin_module.tenancy_admin, "save_draft", _fake_save_draft)
+        monkeypatch.setattr(admin_module.tenancy_admin, "get_draft", _fake_get_draft)
 
         response = admin_client.put(
             "/admin/api/tenants/hotel-mzv",
@@ -379,7 +421,7 @@ class TestPutTenantRoute:
         )
         assert response.status_code == 200
         body = response.json()
-        assert body["system_prompt_override"] is None
+        assert body["config"]["system_prompt_override"] is None
         assert "## Safety" in body["_rendered_system_prompt"]
 
     @pytest.mark.parametrize(
@@ -418,38 +460,38 @@ class TestPutTenantRoute:
         response = admin_client.put("/admin/api/tenants/does-not-exist", json={}, headers=_bearer())
         assert response.status_code == 404
 
-    def test_version_conflict_maps_to_409(self, admin_client, monkeypatch):
-        async def _raising_save(config, *, expected_version, client=None):
+    def test_stale_if_match_against_the_draft_maps_to_409(self, admin_client, monkeypatch):
+        async def _raising_save_draft(config, *, expected_version, client=None):
             raise VersionConflictError("someone else saved first")
 
-        monkeypatch.setattr(admin_module.tenancy_admin, "save_tenant", _raising_save)
+        monkeypatch.setattr(admin_module.tenancy_admin, "save_draft", _raising_save_draft)
 
         response = admin_client.put(
             "/admin/api/tenants/hotel-mzv",
             json={"greeting": "x"},
-            headers={**_bearer(), "If-Match": "stale-version"},
+            headers={**_bearer(), "If-Match": "stale-draft-version"},
         )
         assert response.status_code == 409
         assert "someone else" in response.json()["detail"]
 
-    def test_voice_consent_required_maps_to_409_with_actionable_copy(
-        self, admin_client, monkeypatch
-    ):
-        async def _raising_save(config, *, expected_version, client=None):
-            raise VoiceConsentRequiredError(
-                "tenant 'hotel-mzv' has no recorded voice consent — run "
-                "`python -m scripts.onboard_tenant ...`"
-            )
+    def test_voice_consent_is_not_checked_at_draft_save_time(self, admin_client, monkeypatch):
+        """The consent gate moved to deploy/switch — a draft may stage an
+        unconsented voice_id change freely; it just can't go live yet."""
+        saved: dict = {}
 
-        monkeypatch.setattr(admin_module.tenancy_admin, "save_tenant", _raising_save)
+        async def _fake_save_draft(config, *, expected_version, client=None):
+            saved["config"] = config
+            return "draft-v1"
+
+        monkeypatch.setattr(admin_module.tenancy_admin, "save_draft", _fake_save_draft)
 
         response = admin_client.put(
             "/admin/api/tenants/hotel-mzv",
             json={"voice": {"voice_id": "new-voice"}},
             headers=_bearer(),
         )
-        assert response.status_code == 409
-        assert "onboard_tenant" in response.json()["detail"]
+        assert response.status_code == 200
+        assert saved["config"].voice.voice_id == "new-voice"
 
     def test_an_operator_only_field_is_blocked_for_a_tenant_principal(self, admin_client):
         app.dependency_overrides[require_admin] = lambda: AdminPrincipal(
@@ -466,14 +508,17 @@ class TestPutTenantRoute:
         assert response.status_code == 403
 
     def test_a_tenant_principal_may_still_edit_ordinary_fields(self, admin_client, monkeypatch):
-        async def _fake_save(config, *, expected_version, client=None):
-            return config
+        saved: dict = {}
 
-        async def _fake_version(tenant_id, *, client=None):
-            return "v2"
+        async def _fake_save_draft(config, *, expected_version, client=None):
+            saved["config"] = config
+            return "draft-v1"
 
-        monkeypatch.setattr(admin_module.tenancy_admin, "save_tenant", _fake_save)
-        monkeypatch.setattr(admin_module.tenancy_admin, "get_tenant_version", _fake_version)
+        async def _fake_get_draft(tenant_id, *, client=None):
+            return (saved.get("config"), "draft-v1" if "config" in saved else None)
+
+        monkeypatch.setattr(admin_module.tenancy_admin, "save_draft", _fake_save_draft)
+        monkeypatch.setattr(admin_module.tenancy_admin, "get_draft", _fake_get_draft)
 
         app.dependency_overrides[require_admin] = lambda: AdminPrincipal(
             kind="tenant", tenant_ids=("hotel-mzv",), subject="user_123"
@@ -487,20 +532,46 @@ class TestPutTenantRoute:
         finally:
             app.dependency_overrides.pop(require_admin, None)
         assert response.status_code == 200
-        assert response.json()["greeting"] == "A tenant-edited greeting"
+        assert response.json()["config"]["greeting"] == "A tenant-edited greeting"
+
+    def test_a_tenant_principal_repeating_a_stale_violation_across_saves_is_still_blocked(
+        self, admin_client, monkeypatch
+    ):
+        """Regression guard for comparing against LIVE, not the draft: if the
+        diff were computed against the current draft instead, a violation
+        already staged in a prior save would stop tripping on every save
+        after the first, since it would equal itself."""
+        already_violating = None
+
+        async def _fake_get_draft(tenant_id, *, client=None):
+            nonlocal already_violating
+            if already_violating is None:
+                return None, None
+            return already_violating, "draft-v1"
+
+        monkeypatch.setattr(admin_module.tenancy_admin, "get_draft", _fake_get_draft)
+
+        app.dependency_overrides[require_admin] = lambda: AdminPrincipal(
+            kind="tenant", tenant_ids=("hotel-mzv",), subject="user_123"
+        )
+        try:
+            response = admin_client.put(
+                "/admin/api/tenants/hotel-mzv",
+                json={"status": "paused"},
+                headers=_bearer(),
+            )
+        finally:
+            app.dependency_overrides.pop(require_admin, None)
+        assert response.status_code == 403
 
     def test_body_tenant_id_is_ignored_in_favour_of_the_path(self, admin_client, monkeypatch):
         seen = {}
 
-        async def _fake_save(config, *, expected_version, client=None):
+        async def _fake_save_draft(config, *, expected_version, client=None):
             seen["tenant_id"] = config.tenant_id
-            return config
+            return "draft-v1"
 
-        async def _fake_version(tenant_id, *, client=None):
-            return "v2"
-
-        monkeypatch.setattr(admin_module.tenancy_admin, "save_tenant", _fake_save)
-        monkeypatch.setattr(admin_module.tenancy_admin, "get_tenant_version", _fake_version)
+        monkeypatch.setattr(admin_module.tenancy_admin, "save_draft", _fake_save_draft)
 
         admin_client.put(
             "/admin/api/tenants/hotel-mzv",

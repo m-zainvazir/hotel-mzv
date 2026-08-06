@@ -20,7 +20,7 @@ from app.brain.sanitize import extract_inline_tool_calls
 from app.brain.state import ReceptionistState
 from app.config import get_settings
 from app.mcp.client import load_mcp_tools
-from app.tenancy.loader import get_tenant_config
+from app.tenancy.loader import tenant_config_from_runnable
 from app.tools.registry import native_tools_for
 
 logger = logging.getLogger(__name__)
@@ -37,7 +37,7 @@ _FALLBACK_LINE = "Sorry — I didn't quite catch that. Could you say it again?"
 
 
 async def reason(state: ReceptionistState, config: RunnableConfig) -> dict:
-    tenant = get_tenant_config(state["tenant_id"])
+    tenant = tenant_config_from_runnable(state["tenant_id"], config)
     channel = state.get("channel", "chat")
 
     # Tier 1 first, tier 2 appended — MCP is the long tail, never the fast path.

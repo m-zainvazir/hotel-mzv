@@ -3,12 +3,16 @@ import { useEffect, useState } from "preact/hooks";
 import {
   ApiError,
   archiveTenant,
+  createTestLink,
+  deployTenant,
+  discardDraft,
   getTenantConfig,
   purgeTenant,
   restoreTenant,
-  saveTenantConfig,
+  saveTenantDraft,
   SessionInfo,
   TenantConfig,
+  TenantDetail,
 } from "../api";
 import { navigate } from "../router";
 
@@ -68,6 +72,7 @@ interface ChatValue {
   launcher_label: string;
   quick_replies: boolean;
   greeting: string | null;
+  menu_flow: string | null;
 }
 
 interface KnowledgeValue {
@@ -86,6 +91,48 @@ interface McpServerValue {
   auth_secret_ref: string | null;
 }
 
+interface LinkValue {
+  slug: string;
+  label: string;
+  url: string | null;
+  value: string | null;
+  flow: string | null;
+  description: string;
+  type: "link" | "handoff" | "reply" | "flow";
+}
+
+interface FlowValue {
+  id: string;
+  say: string;
+  buttons: string[];
+  description: string;
+}
+
+interface UiValue {
+  buttons: boolean;
+  cards: boolean;
+  allowed_hosts: string[];
+  max_cards: number;
+  opening_turn: boolean;
+}
+
+const UI_DEFAULTS: UiValue = {
+  buttons: true,
+  cards: true,
+  allowed_hosts: [],
+  max_cards: 10,
+  opening_turn: true,
+};
+
+interface ChannelToggleValue {
+  enabled: boolean;
+}
+
+interface ChannelsValue {
+  chat: ChannelToggleValue;
+  voice: ChannelToggleValue;
+}
+
 type FieldErrors = Map<string, string>;
 
 function parseFieldErrors(detail: unknown): FieldErrors {
@@ -100,33 +147,54 @@ function parseFieldErrors(detail: unknown): FieldErrors {
   return errors;
 }
 
+function diffTopLevelKeys(draft: TenantConfig, live: TenantConfig): string[] {
+  // A flat key walk, deliberately — no diff library. Good enough to tell an
+  // operator WHICH sections changed before they deploy; the section forms
+  // themselves are the place to see exactly what.
+  const keys = new Set([...Object.keys(draft), ...Object.keys(live)]);
+  const changed: string[] = [];
+  for (const key of keys) {
+    if (JSON.stringify(draft[key]) !== JSON.stringify(live[key])) changed.push(key);
+  }
+  return changed.sort();
+}
+
 export function ConfigView({ tenantId, session }: { tenantId: string; session: SessionInfo }) {
   const isOperator = session.kind === "operator";
+  const [detail, setDetail] = useState<TenantDetail | null>(null);
   const [config, setConfig] = useState<TenantConfig | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [fieldErrors, setFieldErrors] = useState<FieldErrors>(new Map());
   const [saving, setSaving] = useState(false);
   const [savedNotice, setSavedNotice] = useState(false);
+  const [deployOpen, setDeployOpen] = useState(false);
+  const [deployNote, setDeployNote] = useState("");
+  const [deploying, setDeploying] = useState(false);
 
   function load(): void {
     setConfig(null);
+    setDetail(null);
     setError(null);
     getTenantConfig(tenantId)
-      .then(setConfig)
+      .then((d) => {
+        setDetail(d);
+        setConfig(d.config);
+      })
       .catch((err) => setError(err instanceof ApiError ? err.message : "failed to load config"));
   }
 
   useEffect(load, [tenantId]);
 
   async function save(): Promise<void> {
-    if (!config) return;
+    if (!config || !detail) return;
     setSaving(true);
     setError(null);
     setFieldErrors(new Map());
     setSavedNotice(false);
     try {
-      const saved = await saveTenantConfig(tenantId, config, config._version);
-      setConfig(saved);
+      const saved = await saveTenantDraft(tenantId, config, detail._draft_version);
+      setDetail(saved);
+      setConfig(saved.config);
       setSavedNotice(true);
     } catch (err) {
       if (err instanceof ApiError && err.status === 422) {
@@ -145,6 +213,52 @@ export function ConfigView({ tenantId, session }: { tenantId: string; session: S
     }
   }
 
+  async function doDeploy(): Promise<void> {
+    setDeploying(true);
+    setError(null);
+    try {
+      const updated = await deployTenant(tenantId, deployNote);
+      setDetail(updated);
+      setConfig(updated.config);
+      setDeployOpen(false);
+      setDeployNote("");
+      setSavedNotice(false);
+      // Confirm the publish landed by opening the real, live link — the
+      // same one the header's Test Agent button mints — right away rather
+      // than making you click over and mint it yourself.
+      void mintAndOpenTestLink("live");
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "deploy failed");
+    } finally {
+      setDeploying(false);
+    }
+  }
+
+  async function mintAndOpenTestLink(variant: "live" | "draft"): Promise<void> {
+    setError(null);
+    try {
+      const { url } = await createTestLink(tenantId, "chat", variant);
+      window.open(url, "_blank", "noopener");
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "could not create a test link");
+    }
+  }
+
+  async function doDiscard(): Promise<void> {
+    setSaving(true);
+    setError(null);
+    try {
+      const updated = await discardDraft(tenantId);
+      setDetail(updated);
+      setConfig(updated.config);
+      setSavedNotice(false);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "could not discard draft");
+    } finally {
+      setSaving(false);
+    }
+  }
+
   function update<K extends keyof TenantConfig>(key: K, value: TenantConfig[K]): void {
     if (!config) return;
     setConfig({ ...config, [key]: value });
@@ -153,14 +267,89 @@ export function ConfigView({ tenantId, session }: { tenantId: string; session: S
   if (error && !config) {
     return <div class="admin-error-banner">{error}</div>;
   }
-  if (!config) {
+  if (!config || !detail) {
     return <p class="admin-muted">Loading…</p>;
   }
 
-  const health = config._health;
+  const health = detail._health;
+  const diffKeys = detail.has_draft ? diffTopLevelKeys(detail.config, detail.live_config) : [];
 
   return (
     <div>
+      {detail.has_draft && (
+        <div class="admin-section admin-section--draft-banner">
+          <strong>Draft — not live.</strong>{" "}
+          {diffKeys.length} section{diffKeys.length === 1 ? "" : "s"} changed since the live
+          version{diffKeys.length > 0 && `: ${diffKeys.join(", ")}`}.
+          <div class="admin-field-row" style={{ marginTop: "0.5rem" }}>
+            <button
+              class="admin-btn"
+              onClick={() => setDeployOpen(true)}
+              disabled={saving || deploying || !isOperator}
+              title={!isOperator ? "operator only" : undefined}
+            >
+              Deploy…
+            </button>
+            <button
+              class="admin-btn admin-btn--secondary"
+              onClick={() => mintAndOpenTestLink("draft")}
+              disabled={saving || deploying}
+              title="Chat with the bot exactly as this draft would behave — before publishing it"
+            >
+              Preview draft
+            </button>
+            <button
+              class="admin-btn admin-btn--secondary"
+              onClick={doDiscard}
+              disabled={saving || deploying}
+            >
+              Discard draft
+            </button>
+          </div>
+        </div>
+      )}
+
+      {deployOpen && (
+        <div class="admin-section admin-section--deploy-confirm">
+          <h2>Deploy this draft?</h2>
+          <p class="admin-muted">
+            This publishes the draft live — the running bot answers with it on the very next
+            turn.
+          </p>
+          {diffKeys.length > 0 ? (
+            <ul>
+              {diffKeys.map((key) => (
+                <li key={key}>
+                  <code>{key}</code> changed
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p class="admin-muted">No changes detected against the live version.</p>
+          )}
+          <div class="admin-field">
+            <label>Note (optional)</label>
+            <input
+              type="text"
+              value={deployNote}
+              onInput={(e) => setDeployNote((e.target as HTMLInputElement).value)}
+            />
+          </div>
+          <div class="admin-field-row">
+            <button class="admin-btn" onClick={doDeploy} disabled={deploying}>
+              {deploying ? "Deploying…" : "Confirm deploy"}
+            </button>
+            <button
+              class="admin-btn admin-btn--secondary"
+              onClick={() => setDeployOpen(false)}
+              disabled={deploying}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
       {health && (
         <div class="admin-tiles" style={{ marginBottom: "1rem" }}>
           <HealthBadge label="Booking" live={health.booking_is_live} value={health.booking_provider} />
@@ -176,7 +365,11 @@ export function ConfigView({ tenantId, session }: { tenantId: string; session: S
       )}
 
       {error && <div class="admin-error-banner">{error}</div>}
-      {savedNotice && <div class="admin-tile" style={{ marginBottom: "1rem" }}>Saved.</div>}
+      {savedNotice && (
+        <div class="admin-tile" style={{ marginBottom: "1rem" }}>
+          Saved as a draft — not live until you deploy it above.
+        </div>
+      )}
 
       <div class="admin-section">
         <h2>Basics</h2>
@@ -279,13 +472,45 @@ export function ConfigView({ tenantId, session }: { tenantId: string; session: S
         errors={fieldErrors}
       />
 
+      <LinksSection
+        value={(config.links as LinkValue[]) ?? []}
+        onChange={(v) => update("links", v as never)}
+        flows={(config.flows as FlowValue[]) ?? []}
+        errors={fieldErrors}
+      />
+
+      <FlowsSection
+        value={(config.flows as FlowValue[]) ?? []}
+        onChange={(v) => update("flows", v as never)}
+        links={(config.links as LinkValue[]) ?? []}
+        menuFlow={(config.chat as unknown as ChatValue)?.menu_flow ?? null}
+        onMenuFlowChange={(id) =>
+          update("chat", {
+            ...(config.chat as unknown as ChatValue),
+            menu_flow: id,
+          } as never)
+        }
+        errors={fieldErrors}
+      />
+
+      <UiSection
+        value={(config.ui as unknown as UiValue) ?? UI_DEFAULTS}
+        onChange={(v) => update("ui", v as never)}
+        errors={fieldErrors}
+      />
+
+      <ChannelsSection
+        value={config.channels as unknown as ChannelsValue}
+        onChange={(v) => update("channels", v as never)}
+      />
+
       <div class="admin-section">
         <h2>Vapi wiring (read-only — change via `provision_vapi`, not here)</h2>
         <pre style={{ fontSize: "0.8rem" }}>{JSON.stringify(config.vapi, null, 2)}</pre>
       </div>
 
       <button class="admin-btn" onClick={save} disabled={saving}>
-        {saving ? "Saving…" : "Save changes"}
+        {saving ? "Saving…" : "Save draft"}
       </button>
 
       {isOperator && (
@@ -1015,6 +1240,385 @@ function McpServersSection({
       <button class="admin-btn admin-btn--secondary" disabled={!isOperator} onClick={add}>
         Add MCP server
       </button>
+    </div>
+  );
+}
+
+function LinksSection({
+  value,
+  onChange,
+  flows,
+  errors,
+}: {
+  value: LinkValue[];
+  onChange: (v: LinkValue[]) => void;
+  flows: FlowValue[];
+  errors: FieldErrors;
+}) {
+  function update(index: number, patch: Partial<LinkValue>): void {
+    onChange(value.map((l, i) => (i === index ? { ...l, ...patch } : l)));
+  }
+  function remove(index: number): void {
+    onChange(value.filter((_, i) => i !== index));
+  }
+  function add(): void {
+    onChange([
+      ...value,
+      { slug: "", label: "", url: "", value: null, flow: null, description: "", type: "link" },
+    ]);
+  }
+
+  return (
+    <div class="admin-section">
+      <h2>Buttons</h2>
+      <p class="admin-muted">
+        One catalog, four places it renders: the greeting menu, a flow's buttons, a card's
+        buttons, and whatever the model picks when it calls <code>offer_actions</code>. The model
+        only ever names a slug from here — never a URL it made up. Chat-only (a voice caller
+        can't click a button).
+      </p>
+      <ul class="admin-muted" style={{ marginTop: "-0.25rem" }}>
+        <li>
+          <strong>link</strong> — opens a URL in a new tab.
+        </li>
+        <li>
+          <strong>flow</strong> — jumps straight to a scripted flow below, with{" "}
+          <em>no AI request at all</em>. Use this for Main Menu and anything that must always say
+          the same thing.
+        </li>
+        <li>
+          <strong>reply</strong> — sends text back as if the visitor typed it, so the AI answers.
+          Use it where the answer genuinely needs thinking.
+        </li>
+        <li>
+          <strong>handoff</strong> — same as reply, but the canned phrase is what makes the bot
+          escalate to a human.
+        </li>
+      </ul>
+      {value.map((link, index) => (
+        <div class="admin-list-item" key={index}>
+          <div class="admin-list-item-header">
+            <strong>{link.label || link.slug || `Button ${index + 1}`}</strong>
+            <button class="admin-btn admin-btn--danger" onClick={() => remove(index)}>
+              Remove
+            </button>
+          </div>
+          <div class="admin-field-row">
+            <TextField
+              label="Slug"
+              value={link.slug}
+              onChange={(v) => update(index, { slug: v })}
+              error={errors.get(`links.${index}.slug`)}
+            />
+            <TextField label="Label" value={link.label} onChange={(v) => update(index, { label: v })} />
+            <div class="admin-field">
+              <label>Type</label>
+              <select
+                value={link.type}
+                onChange={(e) =>
+                  update(index, { type: (e.target as HTMLSelectElement).value as LinkValue["type"] })
+                }
+              >
+                <option value="link">link — open a URL</option>
+                <option value="flow">flow — jump to a scripted step (no AI)</option>
+                <option value="reply">reply — send text back to the AI</option>
+                <option value="handoff">handoff — reach a human</option>
+              </select>
+            </div>
+          </div>
+          <div class="admin-field-row">
+            {link.type === "link" && (
+              <TextField
+                label="URL"
+                value={link.url ?? ""}
+                onChange={(v) => update(index, { url: v })}
+                error={errors.get(`links.${index}.url`)}
+              />
+            )}
+            {link.type === "flow" && (
+              <div class="admin-field">
+                <label>Goes to flow</label>
+                {/* A select over the tenant's own flows, so a dangling
+                    reference is unpickable rather than merely 422-able. */}
+                <select
+                  value={link.flow ?? ""}
+                  onChange={(e) =>
+                    update(index, { flow: (e.target as HTMLSelectElement).value || null })
+                  }
+                >
+                  <option value="">— pick a flow —</option>
+                  {flows.map((flow) => (
+                    <option key={flow.id} value={flow.id}>
+                      {flow.id}
+                    </option>
+                  ))}
+                </select>
+                {errors.get(`links.${index}.flow`) && (
+                  <span class="admin-field-error">{errors.get(`links.${index}.flow`)}</span>
+                )}
+              </div>
+            )}
+            {(link.type === "reply" || link.type === "handoff") && (
+              <TextField
+                label="Sends this text (blank = the label)"
+                value={link.value ?? ""}
+                onChange={(v) => update(index, { value: v || null })}
+              />
+            )}
+            <TextField
+              label="Description (what the model reads to decide)"
+              value={link.description}
+              onChange={(v) => update(index, { description: v })}
+            />
+          </div>
+        </div>
+      ))}
+      <button class="admin-btn admin-btn--secondary" onClick={add}>
+        Add button
+      </button>
+    </div>
+  );
+}
+
+function FlowsSection({
+  value,
+  onChange,
+  links,
+  menuFlow,
+  onMenuFlowChange,
+  errors,
+}: {
+  value: FlowValue[];
+  onChange: (v: FlowValue[]) => void;
+  links: LinkValue[];
+  menuFlow: string | null;
+  onMenuFlowChange: (id: string | null) => void;
+  errors: FieldErrors;
+}) {
+  function update(index: number, patch: Partial<FlowValue>): void {
+    onChange(value.map((f, i) => (i === index ? { ...f, ...patch } : f)));
+  }
+  function remove(index: number): void {
+    onChange(value.filter((_, i) => i !== index));
+  }
+  function add(): void {
+    onChange([...value, { id: "", say: "", buttons: [], description: "" }]);
+  }
+  function toggleButton(index: number, slug: string, on: boolean): void {
+    const current = value[index].buttons;
+    update(index, {
+      buttons: on ? [...current, slug] : current.filter((s) => s !== slug),
+    });
+  }
+  function moveButton(index: number, at: number, by: number): void {
+    const next = [...value[index].buttons];
+    const to = at + by;
+    if (to < 0 || to >= next.length) {
+      return;
+    }
+    [next[at], next[to]] = [next[to], next[at]];
+    update(index, { buttons: next });
+  }
+
+  return (
+    <div class="admin-section">
+      <h2>Flows</h2>
+      <p class="admin-muted">
+        A flow is one scripted step: fixed wording plus buttons. Clicking a flow button shows it{" "}
+        <strong>exactly as written, with no AI involved</strong> — that's what makes a Main Menu
+        button always behave the same way. The AI can also jump into one on its own when someone
+        types something that matches (it reads the description below to decide).
+      </p>
+      <p class="admin-muted">
+        A flow can't ask for or store anything — for that, add a <code>reply</code> button and let
+        the AI take over.
+      </p>
+
+      <div class="admin-field">
+        <label>Menu shown under the greeting</label>
+        <select
+          value={menuFlow ?? ""}
+          onChange={(e) => onMenuFlowChange((e.target as HTMLSelectElement).value || null)}
+        >
+          <option value="">— none (show service chips instead) —</option>
+          {value.map((flow) => (
+            <option key={flow.id} value={flow.id}>
+              {flow.id}
+            </option>
+          ))}
+        </select>
+        <span class="admin-muted">
+          This flow's buttons appear before the visitor types anything. Point your "Main Menu"
+          button at the same flow so the two can never drift apart.
+        </span>
+        {errors.get("chat.menu_flow") && (
+          <span class="admin-field-error">{errors.get("chat.menu_flow")}</span>
+        )}
+      </div>
+
+      {value.map((flow, index) => (
+        <div class="admin-list-item" key={index}>
+          <div class="admin-list-item-header">
+            <strong>{flow.id || `Flow ${index + 1}`}</strong>
+            <button class="admin-btn admin-btn--danger" onClick={() => remove(index)}>
+              Remove
+            </button>
+          </div>
+          <div class="admin-field-row">
+            <TextField
+              label="Id"
+              value={flow.id}
+              onChange={(v) => update(index, { id: v })}
+              error={errors.get(`flows.${index}.id`)}
+            />
+            <TextField
+              label="When to start it (the AI reads this)"
+              value={flow.description}
+              onChange={(v) => update(index, { description: v })}
+            />
+          </div>
+          <div class="admin-field">
+            <label>Message (shown word for word)</label>
+            <textarea
+              rows={3}
+              value={flow.say}
+              onInput={(e) => update(index, { say: (e.target as HTMLTextAreaElement).value })}
+            />
+            {errors.get(`flows.${index}.say`) && (
+              <span class="admin-field-error">{errors.get(`flows.${index}.say`)}</span>
+            )}
+          </div>
+          <div class="admin-field">
+            <label>Buttons (shown in this order)</label>
+            {flow.buttons.map((slug, at) => (
+              <div class="admin-field-row" key={slug}>
+                <span>
+                  {at + 1}. {links.find((l) => l.slug === slug)?.label || slug}
+                </span>
+                <button class="admin-btn admin-btn--secondary" onClick={() => moveButton(index, at, -1)}>
+                  ↑
+                </button>
+                <button class="admin-btn admin-btn--secondary" onClick={() => moveButton(index, at, 1)}>
+                  ↓
+                </button>
+              </div>
+            ))}
+            {links.length === 0 && (
+              <span class="admin-muted">Add some buttons above first.</span>
+            )}
+            {links.map((link) => (
+              <CheckboxField
+                key={link.slug}
+                label={`${link.label || link.slug} (${link.type})`}
+                checked={flow.buttons.includes(link.slug)}
+                onChange={(on) => toggleButton(index, link.slug, on)}
+              />
+            ))}
+            {errors.get(`flows.${index}.buttons`) && (
+              <span class="admin-field-error">{errors.get(`flows.${index}.buttons`)}</span>
+            )}
+          </div>
+        </div>
+      ))}
+      <button class="admin-btn admin-btn--secondary" onClick={add}>
+        Add flow
+      </button>
+    </div>
+  );
+}
+
+function UiSection({
+  value,
+  onChange,
+  errors,
+}: {
+  value: UiValue;
+  onChange: (v: UiValue) => void;
+  errors: FieldErrors;
+}) {
+  return (
+    <div class="admin-section">
+      <h2>Interface</h2>
+      <p class="admin-muted">
+        What the bot is allowed to put on screen. <strong>All on by default</strong> — the bot
+        builds its own buttons, quick replies and image cards from whatever your AI Prompt tells
+        it to, with nothing configured here. These are switches for turning that off, not for
+        turning it on.
+      </p>
+      <p class="admin-muted">
+        The Buttons and Flows sections above are for the cases where you want to pin something
+        down exactly — a link that must always be right, or a menu that must always say the same
+        words. Everything else the bot can invent as it goes.
+      </p>
+      <div class="admin-field-row">
+        <CheckboxField
+          label="Buttons and quick replies"
+          checked={value.buttons}
+          onChange={(v) => onChange({ ...value, buttons: v })}
+        />
+        <CheckboxField
+          label="Image cards"
+          checked={value.cards}
+          onChange={(v) => onChange({ ...value, cards: v })}
+        />
+        <CheckboxField
+          label="Let the bot write its own opening message"
+          checked={value.opening_turn}
+          onChange={(v) => onChange({ ...value, opening_turn: v })}
+        />
+      </div>
+      <p class="admin-muted">
+        "Opening message" runs one real AI turn as the chat opens, so the bot can greet people
+        with buttons instead of the fixed greeting above. It costs one request per visitor who
+        opens the widget, including those who never type. Ignored when you've set a menu flow —
+        that's already instant and free.
+      </p>
+      <ListField
+        label="Allowed link hosts (empty = any; e.g. amazon.com or *.media-amazon.com)"
+        values={value.allowed_hosts}
+        onChange={(v) => onChange({ ...value, allowed_hosts: v })}
+      />
+      <p class="admin-muted">
+        Restricts URLs the <em>bot</em> comes up with, never ones you entered in Buttons above.
+        Leave it empty unless you have a reason — a bot that can only link where you've said is
+        also a bot that can't link to something useful it found.
+      </p>
+      <NumberField
+        label="Max cards per message"
+        value={value.max_cards}
+        onChange={(v) => onChange({ ...value, max_cards: v })}
+        error={errors.get("ui.max_cards")}
+      />
+    </div>
+  );
+}
+
+function ChannelsSection({
+  value,
+  onChange,
+}: {
+  value: ChannelsValue;
+  onChange: (v: ChannelsValue) => void;
+}) {
+  return (
+    <div class="admin-section">
+      <h2>Channels</h2>
+      <p class="admin-muted">
+        Turning a channel off 404s that door for this bot on the very next deploy — the other
+        channel is never affected.
+      </p>
+      <div class="admin-field-row">
+        <CheckboxField
+          label="Chat enabled"
+          checked={value.chat.enabled}
+          onChange={(v) => onChange({ ...value, chat: { enabled: v } })}
+        />
+        <CheckboxField
+          label="Voice enabled"
+          checked={value.voice.enabled}
+          onChange={(v) => onChange({ ...value, voice: { enabled: v } })}
+        />
+      </div>
     </div>
   );
 }

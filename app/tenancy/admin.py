@@ -23,11 +23,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
 
 from app.config import get_settings
+from app.db.models import TenantVersion
 from app.tenancy.loader import get_tenant_config, refresh_tenant_repository
 from app.tenancy.models import TenantConfig
 from app.tenancy.repository import TenantNotFoundError
@@ -41,9 +43,11 @@ logger = logging.getLogger(__name__)
 #: so a naive `DELETE /tenants` is rejected for any bot that has ever taken a
 #: call. `services` / `mcp_servers` / `voice_consents` DO cascade already,
 #: but are still deleted explicitly and in order here — cascade would give
-#: no per-table row count, and a purge must be auditable. Extend this tuple
-#: with `("knowledge_chunks", "tenant_id")` / `("knowledge_documents",
-#: "tenant_id")` at the front once Part C's tables exist; they don't yet.
+#: no per-table row count, and a purge must be auditable. `tenant_versions`
+#: (Phase 9.1) sits immediately before `tenants` — same class of gap this
+#: tuple already closed once for `knowledge_chunks`/`knowledge_documents`:
+#: the FK cascades regardless, but the per-table counts logged for audit
+#: would under-report without it.
 _PURGE_TABLES: tuple[str, ...] = (
     "knowledge_chunks",
     "knowledge_documents",
@@ -56,6 +60,7 @@ _PURGE_TABLES: tuple[str, ...] = (
     "services",
     "mcp_servers",
     "voice_consents",
+    "tenant_versions",
     "tenants",
 )
 
@@ -115,6 +120,23 @@ class VoiceConsentRequiredError(RuntimeError):
     """Raised by both the pre-check (before any write reaches Postgres) and
     by mapping a PostgREST error body naming `voice_consents` — covers the
     race between the two, with the same actionable message either way."""
+
+
+class NoDraftError(RuntimeError):
+    """`deploy_tenant` found no `draft_config` to publish — 409 (nothing to
+    deploy), never a silent no-op."""
+
+
+class VersionNotFoundError(LookupError):
+    """`switch_to_version`/`delete_version` referenced a `tenant_versions`
+    row that doesn't exist (or belongs to a different tenant)."""
+
+
+class LiveVersionDeleteError(RuntimeError):
+    """`delete_version` refuses to delete the currently-live version — the
+    partial unique index (`0012_versions.sql`) would let this happen at the
+    database level, but a tenant with no live version is a worse bug than
+    refusing the request."""
 
 
 def _get_path(data: dict[str, Any], path: str) -> Any:
@@ -253,6 +275,345 @@ async def save_tenant(
     return config
 
 
+# --- draft / deploy / version history (Phase 9.1) ---------------------------
+#
+# `save_tenant` above stays the ONLY function that touches sync_tenant()'s
+# fan-out (tenants + services + mcp_servers) and calls
+# refresh_tenant_repository() — that's what the runtime actually reads.
+# Everything below either writes the inert `draft_config`/`draft_updated_at`
+# columns (never reaching sync_tenant/refresh), or reaches live by calling
+# save_tenant itself (deploy_tenant, switch_to_version) — never a second,
+# parallel write path. `refresh_tenant_repository()` fires on Deploy and
+# switch, and only there — the opposite of the phantom edit Phase 8 fixed.
+
+
+async def _current_draft_row(tenant_id: str, client: httpx.AsyncClient) -> dict[str, Any] | None:
+    response = await client.get(
+        "/tenants",
+        params={
+            "tenant_id": f"eq.{tenant_id}",
+            "select": "draft_config,draft_updated_at",
+            "limit": "1",
+        },
+    )
+    if response.status_code >= 400 or not response.content:
+        return None
+    rows = response.json()
+    return rows[0] if rows else None
+
+
+async def get_draft(
+    tenant_id: str, *, client: httpx.AsyncClient | None = None
+) -> tuple[TenantConfig | None, str | None]:
+    """`(None, None)` when there's no unpublished draft — including when
+    Supabase isn't configured (dev/test's `TENANT_SOURCE=json`), the same
+    "skip entirely" reading `get_tenant_version` gives that case."""
+    settings = get_settings()
+    owns_client = client is None
+    if owns_client and (not settings.supabase_url or not settings.supabase_secret_key):
+        return None, None
+    active = client or _admin_client(settings, timeout=settings.supabase_timeout_seconds)
+    try:
+        row = await _current_draft_row(tenant_id, active)
+    finally:
+        if owns_client:
+            await active.aclose()
+    if not row or not row.get("draft_config"):
+        return None, None
+    return TenantConfig.model_validate(row["draft_config"]), row.get("draft_updated_at")
+
+
+async def save_draft(
+    config: TenantConfig,
+    *,
+    expected_version: str | None,
+    client: httpx.AsyncClient | None = None,
+) -> str:
+    """Write `config` into `tenants.draft_config` — nothing else. No
+    `sync_tenant()` call, no `refresh_tenant_repository()` call: that silence
+    is the entire safety argument for why a draft can never leak live.
+    Returns the new `draft_updated_at`, the version token the next save's
+    `If-Match` compares against.
+    """
+    settings = get_settings()
+    owns_client = client is None
+    active = client or _admin_client(settings, timeout=settings.supabase_timeout_seconds)
+    try:
+        if expected_version is not None:
+            current = await _current_draft_row(config.tenant_id, active)
+            stored_version = current.get("draft_updated_at") if current else None
+            if stored_version != expected_version:
+                raise VersionConflictError(
+                    f"tenant {config.tenant_id!r}'s draft was changed by someone else since "
+                    "you loaded it — reload and re-apply your edit"
+                )
+
+        now = datetime.now(UTC).isoformat()
+        response = await active.post(
+            "/tenants",
+            params={"on_conflict": "tenant_id"},
+            json={
+                "tenant_id": config.tenant_id,
+                "draft_config": config.model_dump(mode="json"),
+                "draft_updated_at": now,
+            },
+        )
+        if response.status_code >= 400:
+            raise TenantSyncError(
+                f"could not save draft for {config.tenant_id!r}: {response.status_code} "
+                f"{response.text[:300]}"
+            )
+    finally:
+        if owns_client:
+            await active.aclose()
+    return now
+
+
+async def discard_draft(tenant_id: str, *, client: httpx.AsyncClient | None = None) -> None:
+    settings = get_settings()
+    owns_client = client is None
+    active = client or _admin_client(settings, timeout=settings.supabase_timeout_seconds)
+    try:
+        response = await active.patch(
+            "/tenants",
+            params={"tenant_id": f"eq.{tenant_id}"},
+            json={"draft_config": None, "draft_updated_at": None},
+        )
+        if response.status_code >= 400:
+            raise TenantSyncError(
+                f"could not discard draft for {tenant_id!r}: {response.status_code} "
+                f"{response.text[:300]}"
+            )
+    finally:
+        if owns_client:
+            await active.aclose()
+
+
+async def _max_version_number(tenant_id: str, client: httpx.AsyncClient) -> int:
+    response = await client.get(
+        "/tenant_versions",
+        params={
+            "tenant_id": f"eq.{tenant_id}",
+            "select": "version_number",
+            "order": "version_number.desc",
+            "limit": "1",
+        },
+    )
+    if response.status_code >= 400 or not response.content:
+        return 0
+    rows = response.json()
+    return rows[0]["version_number"] if rows else 0
+
+
+async def _unset_live_version(tenant_id: str, client: httpx.AsyncClient) -> None:
+    response = await client.patch(
+        "/tenant_versions",
+        params={"tenant_id": f"eq.{tenant_id}", "is_live": "eq.true"},
+        json={"is_live": False},
+    )
+    if response.status_code >= 400:
+        raise TenantSyncError(
+            f"could not clear the previous live version for {tenant_id!r}: "
+            f"{response.status_code} {response.text[:300]}"
+        )
+
+
+async def _insert_version(version: TenantVersion, client: httpx.AsyncClient) -> None:
+    response = await client.post("/tenant_versions", json=version.model_dump(mode="json"))
+    if response.status_code >= 400:
+        raise TenantSyncError(
+            f"could not record deploy version for {version.tenant_id!r}: "
+            f"{response.status_code} {response.text[:300]}"
+        )
+
+
+async def _get_version_row(
+    tenant_id: str, version_id: str, client: httpx.AsyncClient
+) -> dict[str, Any] | None:
+    response = await client.get(
+        "/tenant_versions",
+        params={"id": f"eq.{version_id}", "tenant_id": f"eq.{tenant_id}", "limit": "1"},
+    )
+    if response.status_code >= 400 or not response.content:
+        return None
+    rows = response.json()
+    return rows[0] if rows else None
+
+
+async def deploy_tenant(
+    tenant_id: str,
+    *,
+    note: str = "",
+    deployed_by: str = "",
+    client: httpx.AsyncClient | None = None,
+) -> TenantVersion:
+    """Publish the current draft: validate -> write live (reusing
+    `save_tenant`'s consent gate + `sync_tenant` fan-out + repository
+    refresh) -> record an immutable version row -> clear the draft.
+
+    Live write (step 3) happens BEFORE the version row is inserted (step 4)
+    deliberately — a failed live write must never leave a version row
+    claiming to be live. `TenantConfig.model_validate` re-validates the
+    stored draft rather than trusting whatever passed validation at save
+    time, so a schema change between save and deploy surfaces as a clean
+    `ValidationError` (the route maps it to 422), never a broken live bot.
+    """
+    settings = get_settings()
+    owns_client = client is None
+    active = client or _admin_client(settings, timeout=settings.supabase_timeout_seconds)
+    try:
+        draft_row = await _current_draft_row(tenant_id, active)
+        raw_draft = draft_row.get("draft_config") if draft_row else None
+        if not raw_draft:
+            raise NoDraftError(f"tenant {tenant_id!r} has no draft to deploy")
+
+        config = TenantConfig.model_validate(raw_draft)
+
+        await save_tenant(config, expected_version=None, client=active)
+
+        version = TenantVersion(
+            tenant_id=tenant_id,
+            version_number=await _max_version_number(tenant_id, active) + 1,
+            config=config.model_dump(mode="json"),
+            note=note,
+            deployed_by=deployed_by,
+            is_live=True,
+        )
+        await _unset_live_version(tenant_id, active)
+        await _insert_version(version, active)
+
+        response = await active.patch(
+            "/tenants",
+            params={"tenant_id": f"eq.{tenant_id}"},
+            json={"draft_config": None, "draft_updated_at": None},
+        )
+        if response.status_code >= 400:
+            raise TenantSyncError(
+                f"deployed {tenant_id!r} but could not clear its draft: "
+                f"{response.status_code} {response.text[:300]}"
+            )
+    finally:
+        if owns_client:
+            await active.aclose()
+    return version
+
+
+async def get_live_version(
+    tenant_id: str, *, client: httpx.AsyncClient | None = None
+) -> TenantVersion | None:
+    """The currently-live `tenant_versions` row, or `None` — queried
+    directly by `is_live` rather than assuming it's whatever has the
+    highest `version_number`, since `switch_to_version` can make an OLDER
+    version live again without touching version numbers at all."""
+    settings = get_settings()
+    owns_client = client is None
+    if owns_client and (not settings.supabase_url or not settings.supabase_secret_key):
+        return None
+    active = client or _admin_client(settings, timeout=settings.supabase_timeout_seconds)
+    try:
+        response = await active.get(
+            "/tenant_versions",
+            params={"tenant_id": f"eq.{tenant_id}", "is_live": "eq.true", "limit": "1"},
+        )
+        if response.status_code >= 400 or not response.content:
+            return None
+        rows = response.json()
+    finally:
+        if owns_client:
+            await active.aclose()
+    return TenantVersion.model_validate(rows[0]) if rows else None
+
+
+async def list_versions(
+    tenant_id: str, *, limit: int = 50, client: httpx.AsyncClient | None = None
+) -> list[TenantVersion]:
+    settings = get_settings()
+    owns_client = client is None
+    active = client or _admin_client(settings, timeout=settings.supabase_timeout_seconds)
+    try:
+        response = await active.get(
+            "/tenant_versions",
+            params={
+                "tenant_id": f"eq.{tenant_id}",
+                "order": "version_number.desc",
+                "limit": str(limit),
+            },
+        )
+        if response.status_code >= 400:
+            raise TenantSyncError(
+                f"could not list versions for {tenant_id!r}: {response.status_code} "
+                f"{response.text[:300]}"
+            )
+        rows = response.json() if response.content else []
+    finally:
+        if owns_client:
+            await active.aclose()
+    return [TenantVersion.model_validate(row) for row in rows]
+
+
+async def switch_to_version(
+    tenant_id: str, version_id: str, *, client: httpx.AsyncClient | None = None
+) -> TenantVersion:
+    """Rollback/roll-forward: validate -> write live -> flip `is_live`. No
+    new row, no version number burned — unlike `deploy_tenant`, this is
+    "make an existing snapshot live again," not a new publish."""
+    settings = get_settings()
+    owns_client = client is None
+    active = client or _admin_client(settings, timeout=settings.supabase_timeout_seconds)
+    try:
+        row = await _get_version_row(tenant_id, version_id, active)
+        if row is None:
+            raise VersionNotFoundError(f"no version {version_id!r} for tenant {tenant_id!r}")
+
+        config = TenantConfig.model_validate(row["config"])
+        await save_tenant(config, expected_version=None, client=active)
+
+        await _unset_live_version(tenant_id, active)
+        response = await active.patch(
+            "/tenant_versions",
+            params={"id": f"eq.{version_id}"},
+            json={"is_live": True},
+        )
+        if response.status_code >= 400:
+            raise TenantSyncError(
+                f"could not mark version {version_id!r} live: {response.status_code} "
+                f"{response.text[:300]}"
+            )
+    finally:
+        if owns_client:
+            await active.aclose()
+    return TenantVersion.model_validate({**row, "is_live": True})
+
+
+async def delete_version(
+    tenant_id: str, version_id: str, *, client: httpx.AsyncClient | None = None
+) -> None:
+    """409s on the live version (`LiveVersionDeleteError`) — the partial
+    unique index + `on delete cascade` make the FK side safe regardless, but
+    a tenant with no live version is a worse bug than refusing the request."""
+    settings = get_settings()
+    owns_client = client is None
+    active = client or _admin_client(settings, timeout=settings.supabase_timeout_seconds)
+    try:
+        row = await _get_version_row(tenant_id, version_id, active)
+        if row is None:
+            raise VersionNotFoundError(f"no version {version_id!r} for tenant {tenant_id!r}")
+        if row.get("is_live"):
+            raise LiveVersionDeleteError(
+                f"version {version_id!r} is the live version for {tenant_id!r} — switch "
+                "another version live first"
+            )
+        response = await active.delete("/tenant_versions", params={"id": f"eq.{version_id}"})
+        if response.status_code >= 400:
+            raise TenantSyncError(
+                f"could not delete version {version_id!r}: {response.status_code} "
+                f"{response.text[:300]}"
+            )
+    finally:
+        if owns_client:
+            await active.aclose()
+
+
 async def create_tenant(
     config: TenantConfig, *, client: httpx.AsyncClient | None = None
 ) -> TenantConfig:
@@ -267,6 +628,11 @@ async def create_tenant(
     between the two writes. The admin route always passes `status="active"`
     for a panel-created bot; `set_tenant_status` is the primitive for
     changing it again later.
+
+    Deploys immediately (Phase 9.1): writes live AND records version 1. A
+    bot that existed only as a draft would be invisible to every read path
+    — `get_tenant_config`, the Versions tab, the Test Agent link — and that
+    would be a confusing "did creation even work?" state for an operator.
     """
     settings = get_settings()
     owns_client = client is None
@@ -281,6 +647,17 @@ async def create_tenant(
 
         if config.status != "onboarding":
             await sync_tenant(config, client=active)
+
+        await _insert_version(
+            TenantVersion(
+                tenant_id=config.tenant_id,
+                version_number=1,
+                config=config.model_dump(mode="json"),
+                note="initial creation",
+                is_live=True,
+            ),
+            active,
+        )
     finally:
         if owns_client:
             await active.aclose()

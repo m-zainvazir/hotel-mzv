@@ -11,6 +11,9 @@ touching code**. Edits take effect on the next message — no restart needed.
 | `acknowledgements.json` | The little "one second…" lines said **while a tool runs**, so callers don't hear silence. A `<tool>.<channel>` key (e.g. `escalate.voice`) is tried before the bare `<tool>` key — use it for a line that's only true on one channel. | Reword them, add more |
 | `tenants/<id>.json` → `chat` block | **The widget's own display config** (Phase 5) — `accent_color`, `launcher_label`, `quick_replies` (on/off), an optional widget-specific `greeting` override, and `allowed_origins`. Never reaches the graph; the brain doesn't know a widget exists. | Rebrand the launcher color, restrict a widget key to the client's own domain |
 | `tenants/<id>.json` → `mcp_servers` block | **Which MCP servers this tenant can use** (Phase 6) — a CRM, a search tool, an internal API. In production, prefer `scripts/register_mcp_server.py` instead (see below) — no redeploy needed. | Give a tenant a search tool |
+| `tenants/<id>.json` → `ui` block | **What the bot may put on screen** — buttons, quick replies, image cards, its own opening message. All on by default; a bot builds these from its AI Prompt with nothing configured. See below. | Turn cards off, restrict which hosts it may link to |
+| `tenants/<id>.json` → `links` / `flows` blocks | **Buttons and scripted steps you want pinned down exactly**, rather than left to the bot. A flow renders word for word with no AI involved. | A "Main Menu" button that always says the same thing |
+| `tenants/<id>.json` → `channels` block | **Per-channel on/off switches** (Phase 9.1) — see below. | Take a bot off voice while keeping chat live |
 
 ## The two placeholders you'll meet
 
@@ -362,3 +365,210 @@ channel with nothing deleted (reversible via Restore); Purge is a
 separately-confirmed, irreversible deletion of every row the bot has,
 including every call and chat transcript, only possible once already
 archived.
+
+## Draft, Deploy, and version history (Phase 9.1)
+
+This section is about the `/admin` panel specifically — editing a JSON file
+directly under `TENANT_SOURCE=json` (dev/local) is unaffected and still
+takes effect on the very next turn, same as always; draft/deploy only
+exists on the Supabase-backed admin write path.
+
+`/admin`'s Config and AI Prompt tabs no longer save straight to the running
+bot. **Save** now writes a per-tenant **draft** — a single, mutable,
+inert row (`tenants.draft_config`) that the runtime never reads. Nothing a
+caller hears or sees changes until an operator clicks **Deploy**, which
+validates the draft, writes it live (the same path `save_tenant` always
+used — consent gate, Supabase fan-out, cache refresh), and records an
+immutable `tenant_versions` row. The **Versions** tab is that deploy
+history: **Make live** on any past version rolls back (or forward) without
+burning a new version number; **Delete** removes any version except
+whichever one is currently live.
+
+**A tenant created before this shipped has no versions until its first
+Deploy** — there's no synthesized "version 0"; a version row means "this
+was actually deployed through this system." A panel-created bot ("+ New
+bot") is the one exception: creation deploys immediately, so it starts at
+version 1 with nothing to publish.
+
+This is the opposite of the Phase 8 "phantom edit" bug on purpose: that bug
+was an edit landing somewhere the running bot didn't read, invisibly.
+Here, the gap between "saved" and "live" is the whole point — the banner on
+the Config tab ("Draft — not live. N sections changed") is what keeps it
+from becoming invisible too.
+
+## Buttons, quick replies and cards need no configuration at all
+
+**Start here, because it's the part most people expect to have to set up
+and don't.** Every chat bot can already render buttons, quick replies,
+menus and image carousels, with nothing in its config — the tools are bound
+on every chat tenant and a shared "How this chat looks" section is added to
+every prompt (`ui_rule`, `app/brain/prompts/system.py`). A bot does what its
+AI Prompt tells it to:
+
+```
+When someone asks about booking, offer two buttons: one that opens
+https://example.com/book, and one that says "have someone call me".
+```
+
+That's the whole setup. The model composes those buttons itself and the
+server renders them.
+
+The `ui` block is the set of switches for turning that **off** again, plus
+the guardrail on URLs the bot invents:
+
+```jsonc
+"ui": {
+  "buttons": true,          // model-composed buttons and quick replies
+  "cards": true,            // image carousels
+  "opening_turn": true,     // let the bot write its own first message
+  "allowed_hosts": [],      // empty = the bot may link anywhere http(s)
+  "max_cards": 10
+}
+```
+
+`allowed_hosts` restricts URLs *the model came up with*, never ones you
+typed into `links` below. Leave it empty unless you have a reason: a bot
+that can only link where you've pre-approved is also a bot that can't link
+to something useful it found. Non-`http(s)` URLs (`javascript:`, `data:`)
+are always rejected regardless.
+
+`opening_turn` costs one AI request per visitor who opens the widget,
+including those who never type — it's what lets the opening menu come from
+the prompt. It's ignored when you've configured a `menu_flow`, since that
+renders instantly and for free.
+
+## Pinning a button down exactly (`links`)
+
+Everything above is the bot improvising. `links` is for when you don't want
+it to: a URL that must always be correct, a label that must always read the
+same. It's one catalog feeding **four** places — the greeting menu, a
+flow's buttons, a card's buttons, and `offer_actions` — so you declare a
+button once and reference it by slug everywhere.
+
+```jsonc
+"links": [
+  { "slug": "book-online", "label": "Book online", "type": "link",
+    "url": "https://example-hotel.com/book", "description": "our booking page" },
+  { "slug": "talk-to-someone", "label": "Talk to someone", "type": "handoff",
+    "description": "reach the front desk right now" },
+  { "slug": "main-menu", "label": "🏠 Main Menu", "type": "flow", "flow": "main-menu" },
+  { "slug": "call-me-back", "label": "📞 Have our team contact you", "type": "reply",
+    "value": "please have someone contact me" }
+]
+```
+
+| `type` | What clicking it does |
+|---|---|
+| `link` | Opens `url`. Required for this type. |
+| `flow` | Jumps to the `flow` node below — **deterministic, no AI request at all**. |
+| `reply` | Sends `value` (or the label) as if the visitor typed it; the AI answers. |
+| `handoff` | Same as `reply`, but the phrase is what makes the bot call `escalate`. |
+
+A catalog button is exempt from `allowed_hosts` — you wrote it, so the
+guardrail meant for the model doesn't apply. **Chat-only** either way: a
+voice caller can't click a button, so none of this is bound on that
+channel.
+
+## Scripted flows and a persistent menu (Phase 9.2)
+
+A flow is one step: fixed wording plus buttons. Clicking a `flow` button
+shows it **exactly as written, with no AI involved** — which is what makes
+a `Main Menu` button behave identically every single time, instead of
+"usually".
+
+```jsonc
+"flows": [
+  { "id": "main-menu",
+    "say": "What can I help you with today?",
+    "buttons": ["book-appointment", "find-location", "careers"],
+    "description": "the top-level menu — start this when someone is unsure" },
+  { "id": "locations",
+    "say": "You can view all our locations below in 'Browse Locations'.",
+    "buttons": ["browse-locations", "book-appointment", "main-menu"],
+    "description": "someone wants to find a clinic or an address" }
+],
+"chat": { "menu_flow": "main-menu" }
+```
+
+- `say` is shown **word for word**. It is not a prompt; no model sees it first.
+- `description` is the opposite — it's what the AI reads to decide whether to
+  jump here on its own when someone types free text (via the `start_flow`
+  tool) rather than clicking.
+- `chat.menu_flow` names the flow whose buttons appear under the greeting,
+  before the visitor types anything. Point your `Main Menu` button at the
+  same flow and the two can never drift apart. Leave it unset and the bot
+  keeps showing service chips exactly as before.
+- **A flow can't ask for or store anything.** For a name, a zip code or a
+  phone number, add a `reply` button and let the AI take over — it's far
+  better at open-ended capture than a fixed form. Branching is what buttons
+  are.
+- Every cross-reference is checked when you save: a button pointing at a
+  missing flow, a flow listing a missing button slug, or a `menu_flow` that
+  doesn't exist all fail validation with the exact field named, rather than
+  rendering a dead button.
+
+`content/templates/clinic.json` ships a complete worked example (menu,
+booking flow, locations flow) — the fastest way to see the shape.
+
+## Card carousels
+
+An image, a title, a subtitle and its own buttons, in a swipeable row — for
+products, rooms, locations, events, anything with a picture. **On by
+default**; the bot builds them from its prompt, e.g.:
+
+```
+When someone asks for room options, show them as image cards with the
+room name, the nightly rate, and a "Book this room" button.
+```
+
+Card data is model-supplied by necessity — a scraped product's image and
+link are found mid-conversation and can't come from a catalog — so
+`ui.allowed_hosts` and the scheme check are what stand between it and the
+browser. A card *button* can still name a catalog slug, which skips the
+allowlist as usual.
+
+Turn the whole thing off with `"ui": {"cards": false}`; the bot is then told
+so in its prompt rather than being left to call a tool that refuses.
+
+## Pasted prompts and the `${ui_rule}` / `${links}` / `${flows}` sections
+
+A prompt pasted in from another platform contains none of `${ui_rule}`,
+`${links}` or `${flows}` — so on its own the AI would never learn it can
+render anything at all, let alone which buttons you configured. By default
+the missing sections are appended automatically at the end. Put a
+placeholder in yourself wherever you'd rather it appear and the automatic
+copy for that one stops.
+
+```jsonc
+"prompt_augmentation": "auto_append"   // or "placeholder_only" to never touch your text
+```
+
+The AI Prompt tab shows a banner (with this setting inline) whenever a bot
+has buttons its prompt doesn't mention.
+
+## Turning a channel off for one bot (Phase 9.1)
+
+```jsonc
+"channels": {
+  "chat": { "enabled": true },
+  "voice": { "enabled": true }
+}
+```
+
+Both default `true`, so no existing tenant's behaviour changes. Disabling
+one 404s that door for this bot only — `POST /chat/session` (and therefore
+the widget and any Test Agent link in chat mode) for `chat: false`,
+`POST /chat/completions` (therefore every phone call and web call) for
+`voice: false`. The other channel is never affected either way.
+
+## The Test Agent link (Phase 9.1)
+
+`/admin` → a tenant → the **Test Agent** button in the header (present on
+every tab) mints a signed, shareable `/test/{token}` link and opens it in a
+new tab — a full page embedding the real widget, auto-opened, with no
+widget key needed (so a tenant with an empty `widget_keys[]` is still
+testable this way). It always reflects the **live** config, never an
+undeployed draft, and expires on its own (`TEST_LINK_TTL_SECONDS`, default
+24h) — nothing to revoke by hand. Needs `PUBLIC_BASE_URL` set, same as
+voice provisioning. Greyed out when `channels.chat.enabled` is `false` for
+that tenant.

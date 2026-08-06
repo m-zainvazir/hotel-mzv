@@ -183,7 +183,20 @@ def test_widget_bundle_is_served_when_built(client):
     response = client.get("/widget.js")
     assert response.status_code == 200
     assert "javascript" in response.headers["content-type"]
-    assert response.headers["cache-control"].startswith("public")
+
+
+def test_the_widget_bundle_is_revalidated_never_cached_immutably(client):
+    """`/widget.js` is the frozen embed contract, so its URL can never gain
+    a content hash — the path is fixed forever while the bytes change every
+    build. It used to send `max-age=31536000, immutable`, which is right for
+    a hashed filename and wrong here: a browser would keep serving a stale
+    bundle for up to a year without revalidating, so shipping a widget fix
+    reached nobody. `no-cache` means "revalidate every time", and the ETag
+    (the build hash) makes an unchanged bundle a bodyless 304."""
+    response = client.get("/widget.js")
+    assert response.headers["cache-control"] == "no-cache"
+    assert "immutable" not in response.headers["cache-control"]
+    assert response.headers["etag"]
 
 
 def test_widget_demo_page_is_served(client):
@@ -367,3 +380,16 @@ def test_admin_spa_catch_all_404s_with_a_pointer_when_unbuilt(client, monkeypatc
     response = client.get("/admin/anything")
     assert response.status_code == 404
     assert "npm --prefix admin run build" in response.json()["detail"]
+
+
+def test_route_ordering_test_agent_page_is_not_shadowed_by_the_admin_spa_catch_all(client):
+    """`/test/{token}` isn't under `/admin`, so the `/admin/{path:path}`
+    ordering trap doesn't structurally apply — but pin it anyway (Phase
+    9.1) so this stays true if either route ever moves. A bogus token
+    reaching the real `/test/{token}` handler comes back with its own
+    "invalid or expired test link" detail, not the admin SPA's HTML shell
+    or its "bundle not built" pointer."""
+    response = client.get("/test/not-a-real-token")
+    assert response.status_code == 404
+    assert response.headers["content-type"].startswith("application/json")
+    assert "test link" in response.json()["detail"]

@@ -50,10 +50,17 @@ function init(): void {
   }
 
   const widgetKey = script.dataset.widgetKey;
-  if (!widgetKey) {
-    console.error("[ai-receptionist] missing required data-widget-key attribute");
+  // Phase 9.1 — the Test Agent link path (`/test/{token}`, app/main.py).
+  // Additive to the frozen `data-widget-key` contract: a Test Agent page
+  // carries `data-test-token` instead and no widget key at all.
+  const testToken = script.dataset.testToken;
+  if (!widgetKey && !testToken) {
+    console.error(
+      "[ai-receptionist] missing required data-widget-key (or data-test-token) attribute",
+    );
     return;
   }
+  const autoOpen = script.dataset.autoOpen === "true";
   const accent = script.dataset.accent;
   const baseUrl = new URL(script.src, window.location.href).origin;
 
@@ -73,7 +80,7 @@ function init(): void {
   const mountPoint = document.createElement("div");
   shadow.appendChild(mountPoint);
 
-  render(h(App, { baseUrl, widgetKey, accent }), mountPoint);
+  render(h(App, { baseUrl, widgetKey: widgetKey ?? "", accent, testToken, autoOpen }), mountPoint);
 }
 
 if (document.readyState === "loading") {

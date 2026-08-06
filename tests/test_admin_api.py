@@ -64,8 +64,12 @@ def test_get_tenant_returns_config_and_health_flags(admin_client):
     response = admin_client.get("/admin/api/tenants/hotel-mzv", headers=_bearer())
     assert response.status_code == 200
     body = response.json()
-    assert body["tenant_id"] == "hotel-mzv"
-    assert body["greeting"]
+    assert body["config"]["tenant_id"] == "hotel-mzv"
+    assert body["config"]["greeting"]
+    # Phase 9.1: no draft under TENANT_SOURCE=json (dev/test default) — the
+    # effective config is just the live one.
+    assert body["config"] == body["live_config"]
+    assert body["has_draft"] is False
     assert "_health" in body
     assert body["_health"]["booking_provider"] in {"stub", "calcom"}
 
@@ -80,7 +84,7 @@ def test_get_tenant_includes_the_rendered_system_prompt(admin_client):
     blank box, on a tenant with no override set yet."""
     response = admin_client.get("/admin/api/tenants/hotel-mzv", headers=_bearer())
     body = response.json()
-    assert body["system_prompt_override"] is None
+    assert body["config"]["system_prompt_override"] is None
     assert "Hotel_MZV" in body["_rendered_system_prompt"]
     assert "## Safety" in body["_rendered_system_prompt"]
 

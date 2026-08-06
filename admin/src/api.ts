@@ -137,9 +137,6 @@ export type TenantConfig = Record<string, unknown> & {
   greeting: string;
   persona: string;
   system_prompt_override?: string | null;
-  _health?: ConfigHealth;
-  _rendered_system_prompt?: string;
-  _version?: string | null;
 };
 
 export interface ConfigHealth {
@@ -153,21 +150,101 @@ export interface ConfigHealth {
   mcp_servers_enabled: number;
 }
 
-export function getTenantConfig(tenantId: string): Promise<TenantConfig> {
+export interface TenantVersionSummary {
+  id: string;
+  tenant_id: string;
+  version_number: number;
+  note: string;
+  deployed_by: string;
+  deployed_at: string;
+  is_live: boolean;
+}
+
+export interface TenantVersionRow extends TenantVersionSummary {
+  config: TenantConfig;
+}
+
+// Phase 9.1: GET/PUT/deploy/discard/switch all return this shape now —
+// `config` is the draft when one exists, else live (the editor's working
+// copy); `live_config` is always what's actually running. `_draft_version`
+// is what PUT's `If-Match` targets now, not `_version` (the live row's own
+// token, kept for reference/concurrent-deploy detection only).
+export interface TenantDetail {
+  config: TenantConfig;
+  live_config: TenantConfig;
+  has_draft: boolean;
+  _draft_version: string | null;
+  _version: string | null;
+  _health?: ConfigHealth;
+  _rendered_system_prompt?: string;
+  live_version: TenantVersionSummary | null;
+  /** Permanent public link to this bot — always live config, never expires.
+   *  Relative (`/bot/<key>`) when PUBLIC_BASE_URL isn't set; null when the
+   *  tenant has no widget key. Use `absoluteShareUrl()` to render it. */
+  share_url: string | null;
+}
+
+/** `share_url` resolved against this origin when the server returned a
+ *  relative path (a dev box with no PUBLIC_BASE_URL). */
+export function absoluteShareUrl(shareUrl: string | null | undefined): string | null {
+  if (!shareUrl) return null;
+  return shareUrl.startsWith("http") ? shareUrl : `${window.location.origin}${shareUrl}`;
+}
+
+export function getTenantConfig(tenantId: string): Promise<TenantDetail> {
   return request(`/tenants/${tenantId}`);
 }
 
-export function saveTenantConfig(
+export function saveTenantDraft(
   tenantId: string,
   payload: Record<string, unknown>,
-  version: string | null | undefined,
-): Promise<TenantConfig> {
+  draftVersion: string | null | undefined,
+): Promise<TenantDetail> {
   const headers: Record<string, string> = {};
-  if (version) headers["If-Match"] = version;
+  if (draftVersion) headers["If-Match"] = draftVersion;
   return request(`/tenants/${tenantId}`, {
     method: "PUT",
     body: JSON.stringify(payload),
     headers,
+  });
+}
+
+export function deployTenant(tenantId: string, note?: string): Promise<TenantDetail> {
+  return request(`/tenants/${tenantId}/deploy`, {
+    method: "POST",
+    body: JSON.stringify({ note: note || "" }),
+  });
+}
+
+export function discardDraft(tenantId: string): Promise<TenantDetail> {
+  return request(`/tenants/${tenantId}/draft/discard`, { method: "POST" });
+}
+
+export function listVersions(tenantId: string): Promise<{ versions: TenantVersionRow[] }> {
+  return request(`/tenants/${tenantId}/versions`);
+}
+
+export function switchToVersion(tenantId: string, versionId: string): Promise<TenantDetail> {
+  return request(`/tenants/${tenantId}/versions/${versionId}/switch`, { method: "POST" });
+}
+
+export function deleteVersion(
+  tenantId: string,
+  versionId: string,
+): Promise<{ deleted: string }> {
+  return request(`/tenants/${tenantId}/versions/${versionId}/delete`, { method: "POST" });
+}
+
+// --- Test Agent link (Phase 9.1, shared with 9.3) ---------------------------
+
+export function createTestLink(
+  tenantId: string,
+  mode: "chat" | "voice" = "chat",
+  variant: "live" | "draft" = "live",
+): Promise<{ url: string; expires_at: number }> {
+  return request(`/tenants/${tenantId}/test-link`, {
+    method: "POST",
+    body: JSON.stringify({ mode, variant }),
   });
 }
 
@@ -186,15 +263,24 @@ export interface CreateTenantPayload {
   escalation_phone: string;
 }
 
-export function createTenant(payload: CreateTenantPayload): Promise<TenantConfig> {
+// These three return a full TenantDetail (`{config, live_config, ...}`),
+// NOT a bare TenantConfig — every lifecycle route ends in
+// `_tenant_detail(...)` (app/channels/admin.py). They were typed as
+// TenantConfig when Phase 9 Part B added them, which stayed true until
+// Phase 9.1 wrapped the response; the annotation then quietly disabled the
+// one thing that would have caught the difference, and `created.tenant_id`
+// compiled fine while being `undefined` at runtime. Keep these accurate:
+// `tsc --noEmit` in the build IS the regression guard here, since no Python
+// test can see across the wire into TypeScript.
+export function createTenant(payload: CreateTenantPayload): Promise<TenantDetail> {
   return request("/tenants", { method: "POST", body: JSON.stringify(payload) });
 }
 
-export function archiveTenant(tenantId: string): Promise<TenantConfig> {
+export function archiveTenant(tenantId: string): Promise<TenantDetail> {
   return request(`/tenants/${tenantId}/archive`, { method: "POST" });
 }
 
-export function restoreTenant(tenantId: string): Promise<TenantConfig> {
+export function restoreTenant(tenantId: string): Promise<TenantDetail> {
   return request(`/tenants/${tenantId}/restore`, { method: "POST" });
 }
 

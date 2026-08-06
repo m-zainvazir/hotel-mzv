@@ -128,6 +128,33 @@ def _partial_marker_length(text: str) -> int:
     return 0
 
 
+#: http(s) URLs the model wrote directly into its reply text — e.g. an
+#: instruction typed into the AI Prompt ("redirect them to
+#: https://example.com") rather than registered as a `links` catalog entry.
+#: The catalog + `offer_actions` path stays the "right" way (the model never
+#: writes a URL at all, so text and button never duplicate each other, and a
+#: hallucinated/injected URL in a tool result can't become clickable); this
+#: is the deliberate fallback for when it wasn't used, so the URL is at
+#: least a real link instead of dead text. Chat-only, same reasoning
+#: `offer_actions` itself is chat-only — see app/brain/runner.py's caller.
+_URL_RE = re.compile(r'https?://[^\s<>"]+')
+_URL_TRAILING_PUNCT = ".,;:!?)]}'\""
+
+
+def extract_urls(text: str) -> list[str]:
+    """URLs found in `text`, in order, de-duplicated, trailing sentence
+    punctuation stripped (so "...at https://example.com." doesn't capture
+    the period as part of the link)."""
+    seen: set[str] = set()
+    urls: list[str] = []
+    for match in _URL_RE.finditer(text):
+        url = match.group(0).rstrip(_URL_TRAILING_PUNCT)
+        if url and url not in seen:
+            seen.add(url)
+            urls.append(url)
+    return urls
+
+
 _SENTENCE_END = re.compile(r"[.!?…]['\")\]]*(\s|$)")
 
 

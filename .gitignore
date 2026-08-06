@@ -51,3 +51,10 @@ graphify-out/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Local scratch — never committed.
+# `botsify/` holds client prompt scripts used as reference while building
+# Phase 9.2. They contain a third party's internal flow and real staff email
+# addresses, and this repo is public, so they stay on disk only.
+botsify/
+check.txt

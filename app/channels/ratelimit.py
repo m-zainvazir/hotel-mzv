@@ -140,6 +140,24 @@ async def enforce_chat_rate_limit(
         raise _too_many_requests(tenant_retry)
 
 
+async def enforce_test_session_rate_limit(request: Request) -> None:
+    """`POST /test/session` (Phase 9.1) — its own bucket, deliberately
+    separate from `chat-ip` (the public widget's): a shared Test Agent link
+    an operator hands around shouldn't compete with real visitor traffic's
+    budget, or vice versa."""
+    settings = get_settings()
+    if not settings.rate_limit_enabled:
+        return
+    retry_after = _hit(
+        "test-session-ip",
+        _client_ip(request),
+        limit=settings.chat_requests_per_minute,
+        window_seconds=60.0,
+    )
+    if retry_after is not None:
+        raise _too_many_requests(retry_after)
+
+
 async def enforce_admin_rate_limit(request: Request) -> None:
     """`/admin/api/*` (Phase 8) — a generous per-IP ceiling on top of
     `require_admin`'s auth check. Not exempt for anyone, unlike the chat

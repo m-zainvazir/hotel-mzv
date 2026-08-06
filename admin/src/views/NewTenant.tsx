@@ -66,7 +66,10 @@ export function NewTenantView() {
         greeting: greeting.trim(),
         escalation_phone: escalationPhone.trim(),
       });
-      navigate(tenantUrl(created.tenant_id, "config"));
+      // `created` is a TenantDetail, so the id lives one level down. Reading
+      // `created.tenant_id` here navigated to the literal string "undefined"
+      // — the bot was created correctly and then the panel couldn't find it.
+      navigate(tenantUrl(created.config.tenant_id, "config"));
     } catch (err) {
       if (err instanceof ApiError && err.status === 422) {
         setFieldErrors(parseFieldErrors(err.detail));

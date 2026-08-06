@@ -187,6 +187,19 @@ table.admin-table tr:hover td {
   }
 }
 
+.admin-tenant-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.admin-test-agent {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
 .admin-tabs {
   display: flex;
   gap: 0.25rem;
@@ -309,6 +322,27 @@ table.admin-table tr:hover td {
 
 .admin-section--danger h2 {
   color: var(--admin-danger);
+}
+
+.admin-section--draft-banner,
+.admin-section--deploy-confirm {
+  border-color: #f59e0b;
+  background: #fef3c7;
+  color: #92400e;
+}
+
+@media (prefers-color-scheme: dark) {
+  .admin-section--draft-banner,
+  .admin-section--deploy-confirm {
+    background: #451a03;
+    color: #fdba74;
+    border-color: #b45309;
+  }
+}
+
+.admin-section--deploy-confirm ul {
+  margin: 0.5rem 0;
+  padding-left: 1.25rem;
 }
 
 .admin-danger-row {
@@ -439,4 +473,172 @@ button.admin-btn--danger {
   .admin-main {
     padding: 1rem;
   }
+}
+
+/* --- Deploy Agent modal (Phase 9.2) ------------------------------------ */
+
+.admin-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 3rem 1rem;
+  overflow-y: auto;
+  z-index: 50;
+}
+
+.admin-modal {
+  background: var(--admin-panel, #0f172a);
+  border: 1px solid var(--admin-border);
+  border-radius: 0.75rem;
+  padding: 1.25rem 1.5rem 1.5rem;
+  width: min(46rem, 100%);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
+}
+
+.admin-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 0.5rem;
+}
+
+.admin-modal-header h2 {
+  margin: 0;
+  font-size: 1.15rem;
+}
+
+.admin-modal-close {
+  background: transparent;
+  border: none;
+  color: inherit;
+  font-size: 1rem;
+  cursor: pointer;
+  opacity: 0.7;
+}
+
+.admin-modal-close:hover {
+  opacity: 1;
+}
+
+/* The confirm row: copy on the left, the one real action on the right. */
+.admin-modal-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  border: 1px solid var(--admin-border);
+  border-radius: 0.5rem;
+  padding: 0.85rem 1rem;
+  margin-bottom: 1rem;
+}
+
+.admin-modal-row p {
+  margin: 0.25rem 0 0;
+}
+
+.admin-modal-block {
+  border-top: 1px solid var(--admin-border);
+  padding-top: 1rem;
+  margin-top: 1rem;
+}
+
+.admin-modal-block h3 {
+  margin: 0 0 0.35rem;
+  font-size: 0.95rem;
+}
+
+.admin-share-row {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+
+.admin-share-row input {
+  flex: 1;
+  min-width: 0;
+}
+
+.admin-publish-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(8.5rem, 1fr));
+  gap: 0.6rem;
+  margin-top: 0.6rem;
+}
+
+.admin-publish-tile {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.9rem 0.5rem;
+  border: 1px solid var(--admin-border);
+  border-radius: 0.5rem;
+  background: transparent;
+  color: inherit;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+.admin-publish-tile:hover {
+  border-color: var(--admin-accent, #14b8a6);
+}
+
+.admin-publish-tile--active {
+  border-color: var(--admin-accent, #14b8a6);
+  background: rgba(20, 184, 166, 0.08);
+}
+
+.admin-publish-icon {
+  font-size: 1.4rem;
+  line-height: 1;
+}
+
+/* --- Versions tab ------------------------------------------------------- */
+
+.admin-version--live {
+  border-color: var(--admin-accent, #14b8a6);
+  background: rgba(20, 184, 166, 0.06);
+}
+
+.admin-version-excerpt {
+  margin: 0.35rem 0 0;
+  font-size: 0.85rem;
+  opacity: 0.85;
+  line-height: 1.45;
+}
+
+/* Inline rather than a modal: the confirmation belongs next to the version
+   it's about, so there's no chance of confirming against the wrong row. */
+.admin-confirm {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-top: 0.6rem;
+  padding: 0.6rem 0.75rem;
+  border: 1px solid var(--admin-accent, #14b8a6);
+  border-radius: 0.5rem;
+  font-size: 0.85rem;
+}
+
+.admin-confirm--danger {
+  border-color: #dc2626;
+}
+
+.admin-version-prompt {
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 55vh;
+  overflow-y: auto;
+  font-size: 0.8rem;
+  line-height: 1.5;
+  border: 1px solid var(--admin-border);
+  border-radius: 0.5rem;
+  padding: 0.75rem;
+  margin-top: 0.75rem;
 }

@@ -5,7 +5,7 @@ from __future__ import annotations
 from langchain_core.runnables import RunnableConfig
 
 from app.brain.state import ReceptionistState
-from app.tenancy.loader import get_tenant_config, resolve_tenant_id
+from app.tenancy.loader import resolve_tenant_id, tenant_config_from_runnable
 
 
 async def resolve_tenant(state: ReceptionistState, config: RunnableConfig) -> dict:
@@ -17,7 +17,7 @@ async def resolve_tenant(state: ReceptionistState, config: RunnableConfig) -> di
         phone_number=configurable.get("called_number"),
         widget_key=configurable.get("widget_key"),
     )
-    tenant = get_tenant_config(tenant_id)
+    tenant = tenant_config_from_runnable(tenant_id, config)
 
     return {
         "tenant_id": tenant_id,

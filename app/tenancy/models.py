@@ -198,6 +198,13 @@ class ChatSettings(BaseModel):
     quick_replies: bool = True
     #: None falls back to the tenant's own `greeting`.
     greeting: str | None = None
+    #: Phase 9.2 — the `FlowNode.id` whose buttons render under the greeting,
+    #: before the visitor has typed anything (the "persistent menu"). When
+    #: set, those buttons REPLACE the `services`-derived quick-reply chips
+    #: above, since an operator who authored a menu meant it; when unset,
+    #: everything behaves exactly as it did before 9.2. Display-only, which
+    #: is why it lives here and `flows` itself doesn't.
+    menu_flow: str | None = None
 
 
 _MCP_SERVER_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
@@ -269,6 +276,176 @@ class McpServerConfig(BaseModel):
         return self
 
 
+_LINK_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,47}$")
+
+
+class TenantLink(BaseModel):
+    """One entry in a tenant's button catalog (Phase 9.1, extended in 9.2).
+
+    The model picks *slugs*, never a URL — `offer_actions`
+    (app/tools/action_tools.py) resolves slug -> this row server-side, so the
+    model can never emit a URL it made up. Phase 9.2 makes this catalog the
+    single source of button truth for four render targets at once (the
+    greeting menu, a flow node's buttons, `offer_actions`, and a card's own
+    buttons), which is why a button is declared here once rather than inline
+    at each site — `🏠 Main Menu` appears in eight flows and is written down
+    exactly once.
+
+    Four types:
+
+    * `link` — opens `url` in a new tab.
+    * `handoff` — needs no `url`: sends a canned phrase, which the model
+      answers by calling the existing `escalate` tool, reusing that whole
+      path (SMS alert, `Escalation` row, the `handoff` artifact).
+    * `reply` — sends `value` (or `label`) back as an ordinary user message,
+      i.e. an LLM turn. The "postback" of a chat platform, minus the flow
+      engine: use it where an answer genuinely needs the model (open-ended
+      capture, a question with no fixed reply).
+    * `flow` — jumps straight to `flow`'s `FlowNode`, deterministically,
+      with **no LLM request at all** (app/flows/render.py). This is the one
+      that makes a `Main Menu` button a certainty rather than a probability.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    slug: str
+    label: str
+    url: str | None = None
+    #: `type="reply"` only — the text sent as a user message when clicked.
+    #: None means "send the label", which is what a chip has always done
+    #: (see widget/src/QuickReplies.tsx). Set it when the visible label is
+    #: emoji-laden or terse enough that echoing it back reads badly.
+    value: str | None = None
+    #: `type="flow"` only — the `FlowNode.id` this button jumps to.
+    #: Existence is checked by `TenantConfig._flow_buttons_resolve`, not
+    #: here: a link can't see its own tenant's flow list.
+    flow: str | None = None
+    description: str = ""
+    type: Literal["link", "handoff", "reply", "flow"] = "link"
+
+    @field_validator("slug")
+    @classmethod
+    def _legal_slug(cls, value: str) -> str:
+        if not _LINK_SLUG_RE.match(value):
+            raise ValueError(f"link slug {value!r} must match {_LINK_SLUG_RE.pattern}")
+        return value
+
+    @model_validator(mode="after")
+    def _link_type_needs_its_target(self) -> TenantLink:
+        if self.type == "link" and not self.url:
+            raise ValueError(f"link {self.slug!r} has type 'link' but no url")
+        if self.type == "flow" and not self.flow:
+            raise ValueError(f"link {self.slug!r} has type 'flow' but no flow")
+        if self.url and not (self.url.startswith("http://") or self.url.startswith("https://")):
+            raise ValueError(f"link {self.slug!r}'s url must be http(s): {self.url!r}")
+        return self
+
+    def reply_text(self) -> str:
+        """What a `reply`/`handoff` click sends back as a user message."""
+        return self.value or self.label
+
+
+class FlowNode(BaseModel):
+    """Phase 9.2 — one scripted step: fixed text plus buttons, nothing else.
+
+    A node is deliberately a *leaf*. It cannot collect input, branch, or hold
+    state — branching is what its buttons are, and anything needing
+    open-ended capture (a name, a zip code, a phone number) is a `reply`
+    button that hands control back to the model, which is far better at that
+    than a rigid form would be. That constraint is what keeps the whole
+    engine ~150 lines instead of a second state machine living beside
+    LangGraph's.
+
+    `say` is rendered **verbatim** to the visitor — it is not a prompt, and
+    no model ever sees it before it's shown. `description` is the opposite:
+    it's what the model reads in "Flows you can start" to decide whether to
+    call `start_flow` for this node.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    id: str
+    say: str
+    #: `TenantLink.slug`s, rendered as buttons in exactly this order.
+    buttons: list[str] = Field(default_factory=list)
+    description: str = ""
+
+    @field_validator("id")
+    @classmethod
+    def _legal_id(cls, value: str) -> str:
+        # Same shape as a link slug: it travels in a `flow:<id>` postback
+        # string and is rendered into the system prompt.
+        if not _LINK_SLUG_RE.match(value):
+            raise ValueError(f"flow id {value!r} must match {_LINK_SLUG_RE.pattern}")
+        return value
+
+
+class UiSettings(BaseModel):
+    """What a bot may render in chat, and what it's allowed to link to.
+
+    Every flag here defaults **on**. That's the whole design goal: a new bot
+    should be able to offer buttons, quick replies, menus and card
+    carousels from its AI prompt alone, with nothing configured. These are
+    kill switches for the rare bot that shouldn't have them, not opt-ins to
+    a feature.
+
+    That is a deliberate reversal of Phase 9.1's "the model never emits a
+    URL" rule, and worth being clear-eyed about: the slug indirection
+    existed so a URL arriving from a poisoned knowledge chunk or a hostile
+    tool result could never become a clickable button on a client's own
+    website. Two things replace it:
+
+    * scheme validation, always, everywhere (`app/flows/urls.py`) — a
+      `javascript:` or `data:` href never renders regardless of settings;
+    * `allowed_hosts`, per tenant — empty means any http(s) host (the
+      zero-config default), a non-empty list pins exactly which hosts may
+      appear (exact, or `*.suffix`).
+
+    A button that names a `links` catalog slug bypasses `allowed_hosts`
+    entirely, since an operator authored it. The allowlist constrains the
+    model, never the operator.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    #: The model may call `offer_actions` to render buttons it composed
+    #: itself. Off means it can still offer *catalog* buttons, if the tenant
+    #: declared any — the tool stays bound either way.
+    buttons: bool = True
+    #: The model may call `offer_cards` to render an image carousel.
+    cards: bool = True
+    allowed_hosts: list[str] = Field(default_factory=list)
+    max_cards: int = Field(default=10, gt=0, le=25)
+    #: Run one real model turn as the chat panel opens, instead of showing
+    #: the static `greeting` string. That's what lets a bot's opening menu
+    #: come from its prompt rather than from `chat.menu_flow` — the model
+    #: can't produce buttons without a turn to produce them in. Costs one
+    #: LLM request per visitor who opens the widget, including those who
+    #: never type anything; turn it off for a high-traffic embed where the
+    #: static greeting is enough.
+    opening_turn: bool = True
+
+
+class ChannelToggle(BaseModel):
+    """A nested object rather than a bare bool, deliberately — Phase 9.3's
+    voice tester needs somewhere to hang `stt_provider`-shaped fields off
+    `channels.voice` without a second schema change."""
+
+    model_config = ConfigDict(frozen=True)
+
+    enabled: bool = True
+
+
+class ChannelSettings(BaseModel):
+    """Phase 9.1 — per-channel kill switches. Defaults true/true, so no
+    existing tenant's behaviour changes and no test needs updating."""
+
+    model_config = ConfigDict(frozen=True)
+
+    chat: ChannelToggle = Field(default_factory=ChannelToggle)
+    voice: ChannelToggle = Field(default_factory=ChannelToggle)
+
+
 class TenantConfig(BaseModel):
     """Everything the brain needs to serve one business."""
 
@@ -307,6 +484,28 @@ class TenantConfig(BaseModel):
     chat: ChatSettings = Field(default_factory=ChatSettings)
     mcp_servers: list[McpServerConfig] = Field(default_factory=list)
     knowledge: KnowledgeSettings = Field(default_factory=KnowledgeSettings)
+    #: Phase 9.1 — the catalog `offer_actions` resolves slugs against. Round-
+    #: trips inside the `config` JSONB automatically (it's outside
+    #: `_TENANT_COLUMNS` in app/tenancy/sync.py), so sync.py and
+    #: supabase_repository.py need no changes for this field.
+    links: list[TenantLink] = Field(default_factory=list)
+    channels: ChannelSettings = Field(default_factory=ChannelSettings)
+    #: Phase 9.2 — scripted, deterministic steps. Like `links` above, these
+    #: ride inside the `config` JSONB automatically (they're outside
+    #: `_TENANT_COLUMNS` in app/tenancy/sync.py), so no migration, and
+    #: sync.py / supabase_repository.py / the draft-deploy path need no
+    #: changes at all.
+    flows: list[FlowNode] = Field(default_factory=list)
+    ui: UiSettings = Field(default_factory=UiSettings)
+    #: What to do when `system_prompt_override` is set but omits the
+    #: `${links}` / `${flows}` / `${cards_rule}` placeholders — the normal
+    #: case for a prompt pasted in from another platform, which is exactly
+    #: when a bot most needs its button catalog described to the model.
+    #: `"auto_append"` adds any missing section to the end of the rendered
+    #: prompt; `"placeholder_only"` leaves the override strictly alone and
+    #: relies on the admin panel's warning banner to tell the operator.
+    #: See app/brain/prompts/system.py.
+    prompt_augmentation: Literal["auto_append", "placeholder_only"] = "auto_append"
 
     @field_validator("tenant_id")
     @classmethod
@@ -347,6 +546,51 @@ class TenantConfig(BaseModel):
         slugs = [s.slug for s in self.services]
         if len(slugs) != len(set(slugs)):
             raise ValueError("service slugs must be unique within a tenant")
+        return self
+
+    @model_validator(mode="after")
+    def _unique_link_slugs(self) -> TenantConfig:
+        slugs = [link.slug for link in self.links]
+        if len(slugs) != len(set(slugs)):
+            raise ValueError("link slugs must be unique within a tenant")
+        return self
+
+    @model_validator(mode="after")
+    def _unique_flow_ids(self) -> TenantConfig:
+        ids = [flow.id for flow in self.flows]
+        if len(ids) != len(set(ids)):
+            raise ValueError("flow ids must be unique within a tenant")
+        return self
+
+    @model_validator(mode="after")
+    def _flow_buttons_resolve(self) -> TenantConfig:
+        """Every cross-reference between links, flows and the menu points at
+        something that exists.
+
+        This has to live on the parent: a `TenantLink` can't see the flow
+        list and a `FlowNode` can't see the catalog. A dangling reference is
+        a dead button — silent, since `resolve_buttons` drops unknown slugs
+        with a warning rather than failing a live turn (correct at runtime,
+        useless as feedback). Catching it here instead means the admin panel
+        422s with a `loc` path pointing at the exact field, which is the
+        whole point of Phase 8's "Pydantic is the entire validation layer".
+        """
+        slugs = {link.slug for link in self.links}
+        flow_ids = {flow.id for flow in self.flows}
+
+        for link in self.links:
+            if link.type == "flow" and link.flow not in flow_ids:
+                raise ValueError(
+                    f"link {link.slug!r} points at flow {link.flow!r}, which does not exist"
+                )
+        for flow in self.flows:
+            unknown = [slug for slug in flow.buttons if slug not in slugs]
+            if unknown:
+                raise ValueError(f"flow {flow.id!r} references unknown link slugs: {unknown}")
+        if self.chat.menu_flow is not None and self.chat.menu_flow not in flow_ids:
+            raise ValueError(
+                f"chat.menu_flow is {self.chat.menu_flow!r}, which is not a declared flow"
+            )
         return self
 
     @model_validator(mode="after")

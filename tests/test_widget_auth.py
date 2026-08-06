@@ -82,3 +82,37 @@ def test_a_freshly_minted_token_is_not_already_expired():
     token = mint_session_token("hotel-mzv", "web_abc")
     time.sleep(0)  # keep it explicit that this is a same-instant check
     assert verify_session_token(token) is not None
+
+
+def test_variant_defaults_to_live():
+    token = mint_session_token("hotel-mzv", "web_abc")
+    assert verify_session_token(token).variant == "live"
+
+
+def test_draft_variant_round_trips():
+    token = mint_session_token("hotel-mzv", "web_abc", variant="draft")
+    claims = verify_session_token(token)
+    assert claims is not None
+    assert claims.variant == "draft"
+
+
+def test_a_token_minted_before_variant_existed_still_verifies_as_live():
+    """Backward compat: a token signed without a "var" claim (impossible to
+    mint post-Phase-9.1, but simulates one already in flight at deploy
+    time) must not be rejected outright — it degrades to "live", the only
+    value that ever existed before."""
+    import hashlib
+    import hmac
+    import json
+    import time as _time
+
+    from app.channels.widget_auth import _b64url, _secret
+
+    payload = {"tid": "hotel-mzv", "sid": "web_abc", "exp": int(_time.time()) + 60}
+    body = _b64url(json.dumps(payload, separators=(",", ":")).encode())
+    signature = hmac.new(_secret().encode("utf-8"), body.encode("ascii"), hashlib.sha256)
+    token = f"{body}.{_b64url(signature.digest())}"
+
+    claims = verify_session_token(token)
+    assert claims is not None
+    assert claims.variant == "live"

@@ -32,7 +32,7 @@ from app.channels import openai_compat as oai
 from app.channels import vapi_schema
 from app.channels.security import require_vapi_secret
 from app.channels.vapi_schema import VapiChatRequest, VapiMessage
-from app.tenancy.loader import resolve_tenant_id
+from app.tenancy.loader import get_tenant_config, require_channel_enabled, resolve_tenant_id
 from app.tenancy.repository import TenantNotFoundError
 
 logger = logging.getLogger(__name__)
@@ -73,6 +73,10 @@ async def chat_completions(request: Request):
             assistant_id=payload.assistant_id,
             phone_number=payload.dialled_number,
         )
+        # ChannelDisabledError subclasses TenantNotFoundError (Phase 9.1) —
+        # the same trick TenantArchivedError already uses — so this one
+        # except clause covers both refusals with no extra branch.
+        require_channel_enabled(get_tenant_config(tenant_id), "voice")
     except TenantNotFoundError as exc:
         logger.warning("vapi turn refused: %s", exc)
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="unknown tenant") from exc
@@ -151,8 +155,12 @@ async def _sse_chunks(turn, *, received_at: float | None = None) -> AsyncIterato
                 if destination and event.data.get("transfer"):
                     pending_transfer = destination
                     logger.warning("transfer requested to %s", destination)
-            elif event.type in ("tool_start", "tool_result", "suggestions"):
+            elif event.type in ("tool_start", "tool_result", "suggestions", "actions"):
                 # Deliberately not spoken — see invariant 1 in the module docstring.
+                # "actions" (Phase 9.1) is chat-only by construction
+                # (native_tools_for never binds offer_actions on voice), so
+                # this branch only ever logs, never reshapes anything for
+                # Vapi — a widget button has no voice-channel equivalent.
                 logger.debug("tool %s: %s", event.type, event.tool)
     except Exception:
         logger.exception("vapi stream failed")

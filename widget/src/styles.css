@@ -136,11 +136,126 @@
   padding: 0.3rem 0.7rem;
   font-size: 0.8rem;
   cursor: pointer;
+  /* Also used for offer_actions' link buttons (ActionButtons.tsx), which
+     render as <a> tags — reset link chrome so they match the <button>
+     chips exactly. */
+  text-decoration: none;
+  display: inline-block;
 }
 
 .ai-recept-chip:hover {
   background: var(--ai-recept-accent);
   color: #fff;
+}
+
+/* Phase 9.2 — a flow node's buttons and a card's buttons stack full-width
+   rather than wrapping inline as chips do. They're the primary action of
+   the message ("pick one of these three"), not an optional garnish on it,
+   and a stacked row is far easier to hit on a phone. */
+.ai-recept-actions--stacked {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  margin-top: 0.5rem;
+}
+
+.ai-recept-actions--stacked .ai-recept-chip {
+  display: block;
+  width: 100%;
+  border-radius: 0.5rem;
+  padding: 0.5rem 0.7rem;
+  text-align: center;
+  background: var(--ai-recept-accent);
+  color: #fff;
+  font-size: 0.82rem;
+}
+
+.ai-recept-actions--stacked .ai-recept-chip:hover {
+  filter: brightness(1.08);
+}
+
+/* Card carousel. `overflow-x` lives on the track, never on the panel, so a
+   wide carousel can never widen the chat window itself. */
+.ai-recept-carousel {
+  margin-top: 0.5rem;
+}
+
+.ai-recept-carousel-track {
+  display: flex;
+  gap: 0.5rem;
+  overflow-x: auto;
+  scroll-snap-type: x mandatory;
+  scrollbar-width: thin;
+  padding-bottom: 0.25rem;
+}
+
+.ai-recept-card {
+  flex: 0 0 82%;
+  scroll-snap-align: start;
+  border: 1px solid rgba(0, 0, 0, 0.1);
+  border-radius: 0.6rem;
+  overflow: hidden;
+  background: #fff;
+}
+
+.ai-recept-card-image {
+  /* A fixed box, so a 4000px scraped product shot and a 60px thumbnail
+     produce the same layout. */
+  aspect-ratio: 16 / 10;
+  background: rgba(0, 0, 0, 0.04);
+}
+
+.ai-recept-card-image img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.ai-recept-card-body {
+  padding: 0.55rem 0.65rem 0.65rem;
+}
+
+.ai-recept-card-title {
+  display: block;
+  font-weight: 600;
+  font-size: 0.85rem;
+  color: inherit;
+  text-decoration: none;
+}
+
+a.ai-recept-card-title:hover {
+  text-decoration: underline;
+}
+
+.ai-recept-card-subtitle {
+  margin: 0.25rem 0 0;
+  font-size: 0.78rem;
+  opacity: 0.75;
+}
+
+.ai-recept-carousel-nav {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.3rem;
+  margin-top: 0.35rem;
+}
+
+.ai-recept-carousel-arrow {
+  border: 1px solid var(--ai-recept-accent);
+  color: var(--ai-recept-accent);
+  background: transparent;
+  border-radius: 999px;
+  width: 1.6rem;
+  height: 1.6rem;
+  line-height: 1;
+  font-size: 1rem;
+  cursor: pointer;
+}
+
+.ai-recept-carousel-arrow:disabled {
+  opacity: 0.35;
+  cursor: default;
 }
 
 .ai-recept-callto {

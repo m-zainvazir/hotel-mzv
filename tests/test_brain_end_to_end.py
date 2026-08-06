@@ -156,8 +156,27 @@ async def test_tenant_config_reaches_the_system_prompt(scripted, northside):
 
 
 async def test_model_is_bound_to_the_native_tool_tier(scripted, hotel):
+    """Chat binds the fixed five plus the two presentation tools every chat
+    bot gets unconditionally (Phase 9.2) — `search_knowledge` and
+    `start_flow` stay conditional and hotel-mzv has neither."""
     model = scripted(ai("Hello."))
     await collect(text="hi", tenant_id=hotel.tenant_id, session_id="bind")
+
+    assert set(model.bound_tool_names) == {
+        "check_availability",
+        "book_job",
+        "send_confirmation",
+        "escalate",
+        "is_emergency",
+        "offer_actions",
+        "offer_cards",
+    }
+
+
+async def test_voice_is_bound_to_the_fixed_five_and_nothing_else(scripted, hotel):
+    """The mirror: neither presentation tool exists down a phone line."""
+    model = scripted(ai("Hello."))
+    await collect(text="hi", tenant_id=hotel.tenant_id, session_id="bind-voice", channel="voice")
 
     assert set(model.bound_tool_names) == {
         "check_availability",

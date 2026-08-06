@@ -9,11 +9,26 @@
   "greeting": "Thanks for calling — how can I help you today?",
   "persona": "Reassuring, professional, and clear. Speaks plainly about appointments and never gives medical advice.",
   "hours": {
-    "monday": { "open": "08:00:00", "close": "17:00:00" },
-    "tuesday": { "open": "08:00:00", "close": "17:00:00" },
-    "wednesday": { "open": "08:00:00", "close": "17:00:00" },
-    "thursday": { "open": "08:00:00", "close": "17:00:00" },
-    "friday": { "open": "08:00:00", "close": "15:00:00" },
+    "monday": {
+      "open": "08:00:00",
+      "close": "17:00:00"
+    },
+    "tuesday": {
+      "open": "08:00:00",
+      "close": "17:00:00"
+    },
+    "wednesday": {
+      "open": "08:00:00",
+      "close": "17:00:00"
+    },
+    "thursday": {
+      "open": "08:00:00",
+      "close": "17:00:00"
+    },
+    "friday": {
+      "open": "08:00:00",
+      "close": "15:00:00"
+    },
     "saturday": null,
     "sunday": null
   },
@@ -25,7 +40,11 @@
       "duration_minutes": 45,
       "price_usd": null,
       "emergency": false,
-      "aliases": ["new patient", "first visit", "consultation"],
+      "aliases": [
+        "new patient",
+        "first visit",
+        "consultation"
+      ],
       "event_type_id": null
     },
     {
@@ -35,7 +54,12 @@
       "duration_minutes": 30,
       "price_usd": null,
       "emergency": false,
-      "aliases": ["checkup", "cleaning", "follow up", "routine visit"],
+      "aliases": [
+        "checkup",
+        "cleaning",
+        "follow up",
+        "routine visit"
+      ],
       "event_type_id": null
     },
     {
@@ -45,7 +69,12 @@
       "duration_minutes": 30,
       "price_usd": null,
       "emergency": true,
-      "aliases": ["urgent", "in pain", "emergency", "asap"],
+      "aliases": [
+        "urgent",
+        "in pain",
+        "emergency",
+        "asap"
+      ],
       "event_type_id": null
     }
   ],
@@ -99,7 +128,83 @@
     "accent_color": "#0f766e",
     "launcher_label": "Chat with us",
     "quick_replies": true,
-    "greeting": null
+    "greeting": null,
+    "menu_flow": "main-menu"
   },
-  "mcp_servers": []
+  "mcp_servers": [],
+  "links": [
+    {
+      "slug": "book-appointment",
+      "label": "📅 Book an Appointment",
+      "type": "flow",
+      "flow": "booking",
+      "description": "someone wants to book or schedule a visit"
+    },
+    {
+      "slug": "find-location",
+      "label": "📍 Find a Location",
+      "type": "flow",
+      "flow": "locations",
+      "description": "someone is looking for a clinic near them"
+    },
+    {
+      "slug": "main-menu",
+      "label": "🏠 Main Menu",
+      "type": "flow",
+      "flow": "main-menu",
+      "description": "back to the top-level options"
+    },
+    {
+      "slug": "book-online",
+      "label": "🌐 Use online form (fastest)",
+      "type": "link",
+      "url": "https://example.com/book-appointment/",
+      "description": "the online booking form — replace with the real URL"
+    },
+    {
+      "slug": "browse-locations",
+      "label": "📍 Browse Locations",
+      "type": "link",
+      "url": "https://example.com/find-a-location/",
+      "description": "the locations page — replace with the real URL"
+    },
+    {
+      "slug": "call-me-back",
+      "label": "📞 Have our team contact you",
+      "type": "reply",
+      "value": "please have someone contact me",
+      "description": "hands back to the AI to collect a name and number"
+    }
+  ],
+  "flows": [
+    {
+      "id": "main-menu",
+      "say": "What can I help you with today?",
+      "buttons": [
+        "book-appointment",
+        "find-location"
+      ],
+      "description": "the top-level menu — start this whenever someone is unsure what they want"
+    },
+    {
+      "id": "booking",
+      "say": "Great — we can get that started. How would you prefer to book?",
+      "buttons": [
+        "book-online",
+        "call-me-back",
+        "main-menu"
+      ],
+      "description": "someone wants to book, schedule or make an appointment"
+    },
+    {
+      "id": "locations",
+      "say": "You can view all our locations below in 'Browse Locations'.",
+      "buttons": [
+        "browse-locations",
+        "book-appointment",
+        "main-menu"
+      ],
+      "description": "someone wants to find a clinic, a location, or an address"
+    }
+  ]
 }

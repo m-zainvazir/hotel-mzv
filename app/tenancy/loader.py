@@ -11,9 +11,12 @@ import logging
 import time
 from threading import RLock
 
+from langchain_core.runnables import RunnableConfig
+
 from app.config import get_settings
 from app.tenancy.models import TenantConfig
 from app.tenancy.repository import (
+    ChannelDisabledError,
     JsonFileTenantRepository,
     TenantArchivedError,
     TenantNotFoundError,
@@ -87,6 +90,35 @@ def get_tenant_config(tenant_id: str) -> TenantConfig:
     return config
 
 
+def tenant_config_from_runnable(tenant_id: str, config: RunnableConfig | None) -> TenantConfig:
+    """The config a graph node/tool should reason with for THIS turn —
+    almost always `get_tenant_config(tenant_id)` (the shared, live cache),
+    except inside a draft-preview conversation (Test Agent's "Preview
+    draft" link), where `app/brain/runner.py::stream_turn` has already
+    resolved the tenant's current draft and stashed it in
+    `RunnableConfig.configurable["tenant_config_override"]` for this one
+    thread only.
+
+    Never the shared cache for a draft: that cache is keyed by `tenant_id`
+    alone and read by every real caller of this tenant, so writing a draft
+    into it would leak an unpublished, unreviewed edit onto a live phone
+    call or widget visitor. The override travels through `configurable`
+    instead — supplied fresh by `stream_turn` on every turn, never
+    persisted by the checkpointer, never reachable from a model argument or
+    request body.
+
+    The one function `app/brain/nodes/resolve_tenant.py`, `reason.py`,
+    `tools.py` and `app/tools/context.py::tenant_from_config` all call —
+    same "both bind sites can't independently drift" reasoning Phase 6/9
+    Part C already established for MCP/knowledge tool binding.
+    """
+    configurable = (config or {}).get("configurable") or {}
+    override = configurable.get("tenant_config_override")
+    if override is not None:
+        return override
+    return get_tenant_config(tenant_id)
+
+
 def _refuse_if_archived(config: TenantConfig) -> None:
     """Every successful resolution below goes through this — a soft-deleted
     (`status: "archived"`, Phase 9 Part B) bot must not answer on any
@@ -151,3 +183,22 @@ def resolve_tenant_id(
     config = get_tenant_config(default_id)
     _refuse_if_archived(config)
     return default_id
+
+
+def require_channel_enabled(config: TenantConfig, channel: str) -> None:
+    """Phase 9.1 — `channels.chat.enabled` / `channels.voice.enabled`.
+
+    Not folded into `resolve_tenant_id` (unlike `TenantArchivedError`'s
+    check): that function has no `channel` argument, since callers resolve
+    a tenant before they necessarily know which channel it's for. Called
+    explicitly instead, once a channel is known: `app/channels/chat.py`'s
+    two endpoints, `app/channels/vapi_llm.py`, and `/test/session`
+    (`app/main.py`). Defaults are true/true, so this is a no-op for every
+    tenant that hasn't opted out of a channel.
+    """
+    toggle = {"chat": config.channels.chat, "voice": config.channels.voice}.get(channel)
+    if toggle is not None and not toggle.enabled:
+        logger.warning(
+            "refusing tenant %s on channel=%s — channel disabled", config.tenant_id, channel
+        )
+        raise ChannelDisabledError(f"tenant {config.tenant_id!r} has channel {channel!r} disabled")

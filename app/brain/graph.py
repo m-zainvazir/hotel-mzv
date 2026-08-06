@@ -12,6 +12,7 @@ import logging
 import traceback
 from urllib.parse import urlparse
 
+from langchain_core.messages import AIMessage
 from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import tools_condition
 
@@ -58,9 +59,38 @@ def build_graph(checkpointer=None):
     builder.add_edge("resolve_tenant", "emergency_check")
     builder.add_edge("emergency_check", "reason")
     builder.add_conditional_edges("reason", tools_condition, {"tools": "tools", END: END})
-    builder.add_edge("tools", "reason")
+    # `tools → reason` unconditionally from Phase 1 until 9.2. The one
+    # exception is `start_flow`: a scripted flow node says exactly what its
+    # config says and stops, so it must not hand back to the model at all.
+    builder.add_conditional_edges("tools", _after_tools, {"reason": "reason", END: END})
 
     return builder.compile(checkpointer=checkpointer)
+
+
+def _after_tools(state) -> str:
+    """END after a flow node; back to `reason` for every other tool result.
+
+    Termination has to be a graph edge rather than a prompt instruction.
+    "Show this text and these buttons, then STOP" is something a model obeys
+    *most* of the time — which is precisely the property a deterministic
+    flow exists to remove. Phase 9.2's whole premise is that a `Main Menu`
+    button is a certainty, and a trailing "Is there anything else I can help
+    with?" bolted on by the model would quietly undo that.
+
+    Reads the artifact rather than the text, like every other artifact
+    consumer here (`app/brain/runner.py::_handoff_artifact` and friends), so
+    it stays independent of `start_flow`'s wording.
+    """
+    for message in reversed(state.get("messages") or []):
+        artifact = getattr(message, "artifact", None)
+        if isinstance(artifact, dict) and artifact.get("kind") == "flow":
+            return END
+        # Only the tool results from this hop matter; stop at the AI message
+        # that requested them so an earlier turn's flow can't strand the
+        # graph forever.
+        if isinstance(message, AIMessage):
+            break
+    return "reason"
 
 
 def get_graph():

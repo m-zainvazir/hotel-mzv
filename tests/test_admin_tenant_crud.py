@@ -314,6 +314,7 @@ class TestPurgeTenantUnit:
             "services",
             "mcp_servers",
             "voice_consents",
+            "tenant_versions",
             "tenants",
         ]
         assert all(count == 1 for count in counts.values())
@@ -412,6 +413,22 @@ def admin_client(monkeypatch):
     monkeypatch.setenv("ADMIN_ENABLED", "true")
     monkeypatch.setenv("ADMIN_AUTH_TOKEN", _TOKEN)
     reset_settings_cache()
+
+    # Phase 9.1: `_tenant_detail` now also reads the draft + live-version
+    # rows on every response — default to "none of either" so these
+    # lifecycle-route tests (which don't care about drafts) don't need to
+    # know the calls exist, and don't trip `no_network` via a real client
+    # built the moment SUPABASE_URL/SUPABASE_SECRET_KEY are set
+    # (`_supabase_configured` always sets them in this file).
+    async def _no_draft(tenant_id, *, client=None):
+        return None, None
+
+    async def _no_live_version(tenant_id, *, client=None):
+        return None
+
+    monkeypatch.setattr(admin_module.tenancy_admin, "get_draft", _no_draft)
+    monkeypatch.setattr(admin_module.tenancy_admin, "get_live_version", _no_live_version)
+
     with TestClient(app) as test_client:
         yield test_client
     app.dependency_overrides.pop(require_admin, None)
@@ -448,7 +465,16 @@ class TestCreateTenantRoute:
             headers=_bearer(),
         )
         assert response.status_code == 201
-        body = response.json()
+        envelope = response.json()
+        # The shape itself is the contract, not just its contents: this
+        # route returns a TenantDetail envelope, and the id is one level
+        # down. `admin/src/api.ts` typed it as a bare TenantConfig for a
+        # while, so the panel read `created.tenant_id`, got `undefined`, and
+        # navigated to /tenants/undefined after successfully creating a bot.
+        assert "tenant_id" not in envelope
+        assert {"config", "live_config", "has_draft"} <= set(envelope)
+
+        body = envelope["config"]
         assert body["tenant_id"] == "a-brand-new-bot"
         assert body["status"] == "active"
         assert len(body["widget_keys"]) == 1
@@ -517,7 +543,7 @@ class TestCreateTenantRoute:
             headers=_bearer(),
         )
         assert response.status_code == 201
-        body = response.json()
+        body = response.json()["config"]
         slugs = {s["slug"] for s in body["services"]}
         assert "checkup" in slugs
         # The template's own danger keywords survive; only the phone number
@@ -668,7 +694,7 @@ class TestArchiveRestoreRoute:
         response = admin_client.post("/admin/api/tenants/hotel-mzv/archive", headers=_bearer())
         assert response.status_code == 200
         assert seen == {"tenant_id": "hotel-mzv", "status": "archived"}
-        assert response.json()["status"] == "archived"
+        assert response.json()["config"]["status"] == "archived"
 
     def test_restore_route_calls_set_tenant_status_with_active(self, admin_client, monkeypatch):
         seen = {}

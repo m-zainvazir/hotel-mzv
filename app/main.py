@@ -14,8 +14,9 @@ from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 
 if sys.platform == "win32":
     # psycopg's async mode (Phase 4 Step 7's Postgres checkpointer) needs
@@ -69,7 +70,9 @@ if sys.platform == "win32":
 from app import __version__
 from app.brain.graph import active_checkpointer_name, get_graph, init_postgres_checkpointer
 from app.channels import admin, chat, vapi_llm, webhooks
+from app.channels.ratelimit import enforce_test_session_rate_limit
 from app.channels.security import is_ops_caller
+from app.channels.test_links import verify_test_token
 from app.config import REPO_ROOT, get_settings
 from app.db.checkpointer import close_postgres_pool
 from app.db.factory import get_store
@@ -77,7 +80,15 @@ from app.db.supabase_store import SupabaseStoreError
 from app.logging_config import configure_logging
 from app.middleware import RequestContextMiddleware
 from app.preflight import verify_production_settings
-from app.tenancy.loader import get_repository, set_repository
+from app.tenancy.admin import get_draft
+from app.tenancy.loader import (
+    get_repository,
+    get_tenant_config,
+    require_channel_enabled,
+    resolve_tenant_id,
+    set_repository,
+)
+from app.tenancy.repository import ChannelDisabledError, TenantNotFoundError
 from app.tenancy.supabase_repository import SupabaseTenantRepository
 from app.tools.booking.mcp_calcom import aclose_calcom_mcp_sessions
 from app.tools.http_client import close_shared_clients
@@ -221,6 +232,22 @@ async def widget_bundle() -> FileResponse:
 
     A missing bundle is a clean 404 with a pointer to the fix, not a 500 —
     the same "degrade, don't crash" posture as the rest of the channel layer.
+
+    **`Cache-Control: no-cache`, never `immutable`.** This used to send
+    `public, max-age=31536000, immutable`, which is the correct header for a
+    content-hashed filename and precisely the wrong one here: this URL is
+    the *frozen embed contract* (widget/README.md), so it can never gain a
+    hash — the path stays `/widget.js` forever while its bytes change on
+    every build. `immutable` tells a browser not to revalidate even on a
+    normal reload, so a client site that loaded the widget once would keep
+    serving that build for up to a year, and shipping a widget fix would
+    reach nobody. The ETag below was already right and simply never got
+    used, because `immutable` means the conditional request is never sent.
+
+    `no-cache` does not mean "don't cache" — it means "cache, but
+    revalidate every time". Combined with the ETag (the build hash, so it
+    changes exactly when the bundle does) an unchanged bundle costs a 304
+    with no body, and a changed one is picked up on the next page load.
     """
     if not WIDGET_BUNDLE_PATH.is_file():
         raise HTTPException(
@@ -228,7 +255,7 @@ async def widget_bundle() -> FileResponse:
             detail="widget bundle not built — run `npm --prefix widget run build` "
             "(see widget/README.md)",
         )
-    headers = {"Cache-Control": "public, max-age=31536000, immutable"}
+    headers = {"Cache-Control": "no-cache"}
     if WIDGET_BUILDHASH_PATH.is_file():
         headers["ETag"] = WIDGET_BUILDHASH_PATH.read_text(encoding="utf-8").strip()
     return FileResponse(WIDGET_BUNDLE_PATH, media_type="text/javascript", headers=headers)
@@ -351,6 +378,222 @@ def _knowledge_health(settings) -> str:
     if not settings.supabase_url:
         return "unavailable"
     return "ready"
+
+
+# --- Test Agent link (Phase 9.1, shared with 9.3's voice tester) -----------
+#
+# Not under /admin — these are the public pages a shared link actually opens,
+# so the `/admin/{path:path}` catch-all ordering trap below doesn't apply to
+# them regardless of where they're registered.
+
+
+def _hosted_widget_page(
+    tenant_name: str,
+    *,
+    embed_attr: str,
+    label: str,
+    note: str,
+    heading: str | None = None,
+    heading_color: str = "#e2e8f0",
+    note_color: str = "#94a3b8",
+) -> str:
+    """One page shell for every hosted surface.
+
+    The Test Agent preview and the public share link both render the real
+    widget, differing only in which attribute identifies the tenant
+    (`data-test-token` vs the frozen `data-widget-key`) and in their framing
+    copy. Deliberately one function: a second bespoke chat UI is exactly
+    what Phase 9.1 avoided, and two page shells would drift the same way.
+
+    Dark, always. The widget renders dark, and a white frame around it made
+    the panel look like a pasted-in screenshot rather than the thing itself.
+    `color-scheme: dark` so scrollbars and form controls inside the widget's
+    shadow root don't fall back to a light UA style on a black page.
+    """
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>{heading or f"{label} — {tenant_name}"}</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    html, body {{ background: #000; }}
+    body {{
+      font-family: system-ui, -apple-system, sans-serif;
+      margin: 0;
+      padding: 2rem;
+      min-height: 100vh;
+      box-sizing: border-box;
+      color: {heading_color};
+      color-scheme: dark;
+    }}
+    h1 {{ font-size: 1.25rem; margin: 0 0 0.5rem; }}
+    p {{ color: {note_color}; max-width: 40rem; line-height: 1.5; margin: 0; }}
+  </style>
+</head>
+<body>
+  <h1>{heading or f"{label} — {tenant_name}"}</h1>
+  {f"<p>{note}</p>" if note else ""}
+  <script src="/widget.js?v={_widget_build_id()}"
+          {embed_attr} data-auto-open="true"></script>
+</body>
+</html>
+"""
+
+
+def _test_agent_page(tenant_name: str, token: str, *, variant: str) -> str:
+    # The real widget, reused wholesale (Phase 9.1's whole point — a second,
+    # bespoke test UI could drift from what a client actually sees).
+    # `data-test-token` is additive to the frozen `data-widget-key` contract
+    # (widget/README.md); `data-auto-open` skips the launcher click a
+    # dedicated test page has no reason to require.
+    is_draft = variant == "draft"
+    return _hosted_widget_page(
+        tenant_name,
+        embed_attr=f'data-test-token="{token}"',
+        label="Draft preview" if is_draft else "Test Agent",
+        note=(
+            "Running against the unpublished draft — re-checks it on every message, so "
+            "further edits show up live in this tab. Deploy or discard and this reverts "
+            "to the published bot."
+            if is_draft
+            else "A private, signed preview — this link isn't discoverable and expires on its own."
+        ),
+        # The draft/live distinction survives as an accent rather than a
+        # background — amber still reads as "unpublished" against black, and
+        # losing that signal would be worse than any styling win.
+        heading_color="#fbbf24" if is_draft else "#e2e8f0",
+        note_color="#fcd34d" if is_draft else "#94a3b8",
+    )
+
+
+def _widget_build_id() -> str:
+    """A cache-busting query for the Test Agent page's `<script src>`.
+
+    A real client embed can't have one — `/widget.js` with no query IS the
+    frozen contract (widget/README.md) — but this page is server-rendered
+    on every load, so it can, and it should: an operator testing a bot must
+    never be looking at a stale bundle without knowing it.
+
+    Earned the hard way. `/widget.js` shipped with `Cache-Control:
+    immutable`, so browsers that fetched it once stopped asking entirely —
+    a page load made no request at all and silently ran a months-old
+    bundle, which looked exactly like a rendering bug in a brand-new
+    feature and cost a long debugging session. The header is fixed now, but
+    that only helps browsers whose cached copy has expired or was never
+    taken; a query that changes with the build fixes it immediately and for
+    anything already poisoned.
+    """
+    try:
+        return WIDGET_BUILDHASH_PATH.read_text(encoding="utf-8").strip()[:12]
+    except OSError:
+        return "dev"
+
+
+async def _resolve_test_tenant(claims):
+    """The `TenantConfig` to show/preview with — LIVE for `variant="live"`,
+    the current draft (falling back to live when there isn't one) for
+    `variant="draft"`. Channel-enabled is checked against that SAME
+    resolved config: previewing a draft that turns chat off should refuse
+    exactly like the deployed version would, not silently ignore the change
+    under test.
+    """
+    try:
+        tenant = get_tenant_config(claims.tenant_id)
+    except TenantNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="unknown tenant") from exc
+
+    if claims.variant == "draft":
+        draft, _ = await get_draft(claims.tenant_id)
+        if draft is not None:
+            tenant = draft
+
+    try:
+        require_channel_enabled(tenant, "chat")
+    except ChannelDisabledError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return tenant
+
+
+def _resolve_test_mode(token: str):
+    claims = verify_test_token(token)
+    if claims is None:
+        raise HTTPException(status_code=404, detail="invalid or expired test link")
+    if claims.mode == "voice":
+        # Minted-and-rejected until Phase 9.3 (the voice tester — moved from
+        # 9.2, which plans/phase9.2.md reassigned to flows/cards). The claim
+        # shape already supports it so a link an operator hands out today
+        # doesn't need to change once the voice tester ships.
+        raise HTTPException(
+            status_code=404, detail="voice testing is not available yet (Phase 9.3)"
+        )
+    return claims
+
+
+@app.get("/test/{token}", include_in_schema=False)
+async def test_agent_page(token: str) -> HTMLResponse:
+    claims = _resolve_test_mode(token)
+    tenant = await _resolve_test_tenant(claims)
+    return HTMLResponse(_test_agent_page(tenant.name, token, variant=claims.variant))
+
+
+@app.get("/bot/{widget_key}", include_in_schema=False)
+async def shared_bot_page(widget_key: str) -> HTMLResponse:
+    """The public "Share agent" link — a hosted page anyone can open.
+
+    Deliberately NOT a Test Agent link. Those are signed, private and
+    expire, which is right for an operator previewing a draft and wrong for
+    a URL a client puts in an email: it would quietly stop working. This is
+    addressed by the tenant's own public widget key instead, so it never
+    expires, and it always serves LIVE config — a shared link must not
+    follow whatever half-finished draft happens to be open.
+
+    It's the same widget a client site embeds, on a page we host, so a
+    business with no website of its own still has somewhere to point people.
+    """
+    try:
+        tenant_id = resolve_tenant_id(widget_key=widget_key)
+    except TenantNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="unknown bot link") from exc
+
+    tenant = get_tenant_config(tenant_id)
+    try:
+        require_channel_enabled(tenant, "chat")
+    except ChannelDisabledError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    return HTMLResponse(
+        _hosted_widget_page(
+            tenant.name,
+            embed_attr=f'data-widget-key="{widget_key}"',
+            # A customer-facing page, so no operator framing: just the
+            # business's name and the chat. `label` still drives <title>.
+            label=tenant.name,
+            heading=tenant.name,
+            note="",
+        )
+    )
+
+
+class TestSessionRequest(BaseModel):
+    token: str
+
+
+@app.post(
+    "/test/session",
+    include_in_schema=False,
+    dependencies=[Depends(enforce_test_session_rate_limit)],
+)
+async def test_session(payload: TestSessionRequest) -> chat.ChatSessionResponse:
+    claims = _resolve_test_mode(payload.token)
+    tenant = await _resolve_test_tenant(claims)
+    # No widget key at all (a tenant with an empty widget_keys[] is still
+    # testable this way) and no allowed_origins check (the page is served
+    # from this app's own origin) — see plans/phase9.1.md's "Feature 1b".
+    # `variant` is what actually makes a "Preview draft" session re-read the
+    # draft on every turn (app/brain/runner.py::stream_turn) — `tenant`
+    # above only drives this handshake response's display fields.
+    return await chat.start_session(tenant, widget_key="", origin=None, variant=claims.variant)
 
 
 # --- serving the admin UI (Phase 8) -----------------------------------------

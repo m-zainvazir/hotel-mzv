@@ -23,6 +23,7 @@ import json
 import secrets
 import time
 from dataclasses import dataclass
+from typing import Literal
 
 from app.config import get_settings
 
@@ -37,6 +38,15 @@ _fallback_secret = secrets.token_urlsafe(32)
 class SessionClaims:
     tenant_id: str
     session_id: str
+    #: Phase 9.1 follow-up — which `TenantConfig` the conversation this
+    #: token authenticates should actually run against. "live" (default,
+    #: and the only value before this existed) is the ordinary widget path.
+    #: "draft" is the Test Agent's "Preview draft" link: `stream_turn`
+    #: (app/brain/runner.py) re-reads the tenant's current draft on every
+    #: turn and threads it through as a `RunnableConfig` override, never
+    #: touching the shared tenant-config cache real callers read from —
+    #: see that module for why a snapshot-in-the-token would go stale.
+    variant: Literal["live", "draft"] = "live"
 
 
 def _secret() -> str:
@@ -56,12 +66,15 @@ def new_session_id() -> str:
     return f"web_{secrets.token_hex(6)}"
 
 
-def mint_session_token(tenant_id: str, session_id: str) -> str:
+def mint_session_token(
+    tenant_id: str, session_id: str, *, variant: Literal["live", "draft"] = "live"
+) -> str:
     """A short-lived token binding one widget session to one tenant."""
     now = int(time.time())
     payload = {
         "tid": tenant_id,
         "sid": session_id,
+        "var": variant,
         "exp": now + get_settings().widget_session_ttl_seconds,
     }
     body = _b64url(json.dumps(payload, separators=(",", ":")).encode())
@@ -84,6 +97,11 @@ def verify_session_token(token: str) -> SessionClaims | None:
         payload = json.loads(_b64url_decode(body))
         if int(payload["exp"]) < int(time.time()):
             return None
-        return SessionClaims(tenant_id=str(payload["tid"]), session_id=str(payload["sid"]))
+        variant = payload.get("var", "live")
+        if variant not in ("live", "draft"):
+            return None
+        return SessionClaims(
+            tenant_id=str(payload["tid"]), session_id=str(payload["sid"]), variant=variant
+        )
     except Exception:
         return None

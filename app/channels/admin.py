@@ -27,6 +27,7 @@ import asyncio
 import json
 import logging
 import secrets
+import time
 from datetime import date, datetime, timedelta
 from typing import Any, Literal
 
@@ -41,6 +42,7 @@ from app.channels.admin_auth import (
     require_tenant_access,
 )
 from app.channels.ratelimit import enforce_admin_rate_limit
+from app.channels.test_links import mint_test_token
 from app.config import get_settings
 from app.db.factory import get_store
 from app.tenancy import admin as tenancy_admin
@@ -157,37 +159,75 @@ async def get_tenant(
     tenant_id: str, principal: AdminPrincipal = Depends(require_tenant_access)
 ) -> dict:
     try:
-        config = get_tenant_config(tenant_id)
+        live = get_tenant_config(tenant_id)
     except TenantNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
-    body = config.model_dump(mode="json")
-    body["_health"] = _config_health(config)
-    # The fully-resolved prompt the brain actually sends to the model right
-    # now — computed here (string formatting only, no store/network I/O) so
-    # the admin panel's "AI Prompt" tab has a real starting point to edit
-    # from, not a blank box, on a tenant with no override set yet.
-    body["_rendered_system_prompt"] = render_system_prompt(config, channel="chat")
-    # None under TENANT_SOURCE=json (dev/test default) — there's no
-    # `tenants.updated_at` row to version against. PUT reads None as "skip
-    # the optimistic-concurrency check", matching that mode's reality: JSON
-    # dev editing has no concurrent-writer story to protect against.
-    body["_version"] = await tenancy_admin.get_tenant_version(tenant_id)
-    return body
+    return await _tenant_detail(live)
 
 
 def _validation_errors(exc: ValidationError) -> list[dict]:
     return [{"loc": list(e["loc"]), "msg": e["msg"], "type": e["type"]} for e in exc.errors()]
 
 
-async def _tenant_detail(config: TenantConfig) -> dict:
-    """The response shape `get_tenant`/`put_tenant`/the Step B4 lifecycle
-    routes all return — factored out so a created/archived/restored tenant
-    renders in the panel exactly like any other GET would."""
-    body = config.model_dump(mode="json")
-    body["_health"] = _config_health(config)
-    body["_rendered_system_prompt"] = render_system_prompt(config, channel="chat")
-    body["_version"] = await tenancy_admin.get_tenant_version(config.tenant_id)
+async def _live_version_summary(tenant_id: str) -> dict | None:
+    version = await tenancy_admin.get_live_version(tenant_id)
+    return version.model_dump(mode="json") if version else None
+
+
+async def _tenant_detail(live: TenantConfig) -> dict:
+    """The response shape `get_tenant`/`put_tenant`/`deploy_tenant_route`/the
+    Step B4 lifecycle routes all return (Phase 9.1 changed its shape: it now
+    carries both the draft-or-live "working" config an editor should show
+    and the actually-running live one, rather than flattening one config
+    into the top level).
+
+    `config` is the DRAFT when one exists, else `live` — so the editor keeps
+    editing from wherever it left off, and a fresh tenant with no draft edits
+    identically to before. `_health`/`_rendered_system_prompt` are computed
+    from that same effective config: the "AI Prompt" tab's starting point to
+    edit from should reflect a pending draft, not paper over it.
+    """
+    draft, draft_version = await tenancy_admin.get_draft(live.tenant_id)
+    effective = draft if draft is not None else live
+
+    body: dict = {
+        "config": effective.model_dump(mode="json"),
+        "live_config": live.model_dump(mode="json"),
+        "has_draft": draft is not None,
+        # None under TENANT_SOURCE=json (dev/test default) — there's no
+        # draft_updated_at row to version against. PUT reads None as "skip
+        # the optimistic-concurrency check".
+        "_draft_version": draft_version,
+    }
+    body["_health"] = _config_health(effective)
+    body["_rendered_system_prompt"] = render_system_prompt(effective, channel="chat")
+    # The LIVE row's version token — unrelated to _draft_version now that PUT
+    # targets the draft; kept for anything that still wants to know "has the
+    # live row itself changed under me" (e.g. a concurrent deploy).
+    body["_version"] = await tenancy_admin.get_tenant_version(live.tenant_id)
+    body["live_version"] = await _live_version_summary(live.tenant_id)
+    # The permanent public link for this bot — always LIVE config, never
+    # expires, safe to hand to anyone (unlike a Test Agent link, which is a
+    # signed private preview that dies on its own). Read from the live
+    # config, not the draft: a share link has to keep working after the
+    # draft it was copied from is discarded.
+    body["share_url"] = _share_url(live)
     return body
+
+
+def _share_url(live: TenantConfig) -> str | None:
+    """`None` when the tenant has no widget key to address it by.
+
+    Absolute when `PUBLIC_BASE_URL` is configured (production, and what a
+    copy-paste-able link needs); otherwise a relative path, which the admin
+    panel resolves against `window.location.origin`. A dev box with no
+    `PUBLIC_BASE_URL` still gets a working link rather than a crash or a
+    `None/bot/...` string.
+    """
+    if not live.widget_keys:
+        return None
+    base = (get_settings().public_base_url or "").rstrip("/")
+    return f"{base}/bot/{live.widget_keys[0]}"
 
 
 @router.put("/tenants/{tenant_id}")
@@ -197,8 +237,16 @@ async def put_tenant(
     principal: AdminPrincipal = Depends(require_tenant_access),
     if_match: str | None = Header(default=None, alias="If-Match"),
 ) -> dict:
-    """Whole-document save: fetch current -> merge the request body onto it
-    -> `TenantConfig.model_validate` -> save.
+    """Whole-document save into the DRAFT (Phase 9.1) — never live anymore.
+    `POST .../deploy` is the only route that reaches live now; see that
+    route and `app/tenancy/admin.py::deploy_tenant`. Every keystroke saved
+    here is invisible to the running bot until Deploy — the opposite of the
+    phantom edit Phase 8 fixed, built deliberately this time.
+
+    Fetch the EFFECTIVE config (the current draft when one exists, else
+    live) -> merge the request body onto it -> `TenantConfig.model_validate`
+    -> write the draft. Editing continues from wherever the draft already is,
+    not from live underneath it.
 
     The merge is a SHALLOW top-level merge (`{**current, **payload}`), not a
     deep one: submitting `{"greeting": "..."}` changes just that scalar, but
@@ -211,16 +259,21 @@ async def put_tenant(
     (`_calcom_tenants_declare_event_types`, `_unique_service_slugs`, every
     `Field(gt=..., le=...)`, ...) are the entire validation layer — this
     route's only job is mapping `ValidationError` to a 422 whose `loc`
-    tuples a UI can attach to the right input, and mapping the two things
-    Pydantic can't know about (a stale version, a missing voice consent) to
-    409s with actionable copy.
+    tuples a UI can attach to the right input, and mapping a stale
+    `If-Match` (now checked against `draft_updated_at`, not the live row) to
+    a 409 with actionable copy. Voice consent is NOT checked here anymore —
+    that gate only matters once a voice_id change actually reaches live, so
+    it moved to `deploy_tenant`/`switch_to_version`.
     """
     try:
-        current = get_tenant_config(tenant_id)
+        live = get_tenant_config(tenant_id)
     except TenantNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
-    merged = {**current.model_dump(mode="json"), **payload, "tenant_id": tenant_id}
+    draft, _draft_version = await tenancy_admin.get_draft(tenant_id)
+    base = draft if draft is not None else live
+
+    merged = {**base.model_dump(mode="json"), **payload, "tenant_id": tenant_id}
     try:
         proposed = TenantConfig.model_validate(merged)
     except ValidationError as exc:
@@ -230,7 +283,10 @@ async def put_tenant(
         ) from exc
 
     if principal.kind != "operator":
-        violations = tenancy_admin.operator_only_violations(current, proposed)
+        # Compared against LIVE, not `base` — comparing against a draft that
+        # already carries the violation would let it slip through on every
+        # save after the first, since the diff against itself is empty.
+        violations = tenancy_admin.operator_only_violations(live, proposed)
         if violations:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
@@ -238,17 +294,171 @@ async def put_tenant(
             )
 
     try:
-        saved = await tenancy_admin.save_tenant(proposed, expected_version=if_match)
+        await tenancy_admin.save_draft(proposed, expected_version=if_match)
     except tenancy_admin.VersionConflictError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+    return await _tenant_detail(live)
+
+
+# --- draft / deploy / version history (Phase 9.1) ---------------------------
+
+
+class DeployRequest(BaseModel):
+    note: str = ""
+
+
+def _require_operator(principal: AdminPrincipal, action: str) -> None:
+    if principal.kind != "operator":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"only an operator principal may {action}",
+        )
+
+
+@router.post("/tenants/{tenant_id}/deploy")
+async def deploy_tenant_route(
+    tenant_id: str,
+    payload: DeployRequest = Body(default_factory=DeployRequest),
+    principal: AdminPrincipal = Depends(require_tenant_access),
+) -> dict:
+    """Publish the current draft — the only route that reaches live besides
+    the whole-tenant lifecycle ones below. Operator-only, same reasoning as
+    `create_tenant_route`/`purge_tenant_route`: publishing is an operator
+    action until `plans/phase10.md` item 14's tenant-login branch exists."""
+    _require_operator(principal, "deploy")
+    try:
+        await tenancy_admin.deploy_tenant(
+            tenant_id, note=payload.note, deployed_by=principal.subject
+        )
+    except tenancy_admin.NoDraftError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except ValidationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=_validation_errors(exc),
+        ) from exc
     except tenancy_admin.VoiceConsentRequiredError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
-    body = saved.model_dump(mode="json")
-    body["_health"] = _config_health(saved)
-    body["_rendered_system_prompt"] = render_system_prompt(saved, channel="chat")
-    body["_version"] = await tenancy_admin.get_tenant_version(tenant_id)
-    return body
+    try:
+        updated = get_tenant_config(tenant_id)
+    except TenantNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    return await _tenant_detail(updated)
+
+
+@router.post("/tenants/{tenant_id}/draft/discard")
+async def discard_draft_route(
+    tenant_id: str, principal: AdminPrincipal = Depends(require_tenant_access)
+) -> dict:
+    """Not operator-only, unlike deploy/switch/delete — discarding your own
+    unpublished edits is ordinary tenant-scoped write, the same class as the
+    PUT that created them."""
+    await tenancy_admin.discard_draft(tenant_id)
+    try:
+        updated = get_tenant_config(tenant_id)
+    except TenantNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    return await _tenant_detail(updated)
+
+
+@router.get("/tenants/{tenant_id}/versions")
+async def list_versions_route(
+    tenant_id: str, principal: AdminPrincipal = Depends(require_tenant_access)
+) -> dict:
+    versions = await tenancy_admin.list_versions(tenant_id)
+    return {"versions": [v.model_dump(mode="json") for v in versions]}
+
+
+@router.post("/tenants/{tenant_id}/versions/{version_id}/switch")
+async def switch_version_route(
+    tenant_id: str,
+    version_id: str,
+    principal: AdminPrincipal = Depends(require_tenant_access),
+) -> dict:
+    """Rollback / roll-forward — operator-only, same reasoning as deploy."""
+    _require_operator(principal, "switch the live version")
+    try:
+        await tenancy_admin.switch_to_version(tenant_id, version_id)
+    except tenancy_admin.VersionNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except ValidationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=_validation_errors(exc),
+        ) from exc
+    except tenancy_admin.VoiceConsentRequiredError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+    try:
+        updated = get_tenant_config(tenant_id)
+    except TenantNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    return await _tenant_detail(updated)
+
+
+@router.post("/tenants/{tenant_id}/versions/{version_id}/delete")
+async def delete_version_route(
+    tenant_id: str,
+    version_id: str,
+    principal: AdminPrincipal = Depends(require_tenant_access),
+) -> dict:
+    _require_operator(principal, "delete a version")
+    try:
+        await tenancy_admin.delete_version(tenant_id, version_id)
+    except tenancy_admin.VersionNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except tenancy_admin.LiveVersionDeleteError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    return {"deleted": version_id}
+
+
+# --- Test Agent link (Phase 9.1, shared with 9.3) ---------------------------
+
+
+class TestLinkRequest(BaseModel):
+    mode: Literal["chat", "voice"] = "chat"
+    #: "live" — the shareable link, always reflects what's actually running.
+    #: "draft" — the Config tab's "Preview draft" button; the conversation
+    #: re-reads the tenant's current draft on every turn
+    #: (app/brain/runner.py::stream_turn), falling back to live if there's
+    #: no draft. Never persisted anywhere beyond the signed token itself.
+    variant: Literal["live", "draft"] = "live"
+
+
+class TestLinkResponse(BaseModel):
+    url: str
+    expires_at: int
+
+
+@router.post("/tenants/{tenant_id}/test-link")
+async def create_test_link(
+    tenant_id: str,
+    payload: TestLinkRequest = Body(default_factory=TestLinkRequest),
+    principal: AdminPrincipal = Depends(require_tenant_access),
+) -> TestLinkResponse:
+    """Mint a signed, shareable `/test/{token}` link. Minting always
+    succeeds regardless of whether a draft currently exists — "no draft to
+    preview" is a `variant: "draft"` link's fallback-to-live behaviour at
+    USE time (`app/main.py::_resolve_test_tenant`), not a mint-time error,
+    since a draft could be saved *after* the link is minted."""
+    settings = get_settings()
+    if not settings.public_base_url:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="PUBLIC_BASE_URL is not set — cannot build a shareable test link",
+        )
+    try:
+        get_tenant_config(tenant_id)
+    except TenantNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+    token = mint_test_token(tenant_id, mode=payload.mode, variant=payload.variant)
+    return TestLinkResponse(
+        url=f"{settings.public_base_url.rstrip('/')}/test/{token}",
+        expires_at=int(time.time()) + settings.test_link_ttl_seconds,
+    )
 
 
 # --- bot lifecycle (Phase 9 Part B) -----------------------------------------

@@ -25,12 +25,12 @@ from langgraph.prebuilt import ToolNode
 
 from app.brain.state import ReceptionistState
 from app.mcp.client import load_mcp_tools
-from app.tenancy.loader import get_tenant_config
+from app.tenancy.loader import tenant_config_from_runnable
 from app.tools.registry import native_tools_for
 
 
 async def tools(state: ReceptionistState, config: RunnableConfig) -> dict:
-    tenant = get_tenant_config(state["tenant_id"])
+    tenant = tenant_config_from_runnable(state["tenant_id"], config)
     channel = state.get("channel", "chat")
 
     available = native_tools_for(tenant, channel) + await load_mcp_tools(tenant)

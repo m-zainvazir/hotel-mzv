@@ -222,6 +222,25 @@ class KnowledgeHit(BaseModel):
     similarity: float
 
 
+class TenantVersion(BaseModel):
+    """One immutable deploy snapshot (Phase 9.1) — a new row per *deploy*,
+    never per save (a save overwrites `tenants.draft_config` instead, which
+    has no row shape of its own). `config` is the full `TenantConfig` dump
+    that was live at `deployed_at`; `is_live` is exclusive per tenant,
+    enforced by a partial unique index (`0012_versions.sql`), not by any
+    invariant this model itself carries.
+    """
+
+    id: str = Field(default_factory=lambda: _new_id("tver"))
+    tenant_id: str
+    version_number: int
+    config: dict
+    note: str = ""
+    deployed_by: str = ""
+    deployed_at: datetime = Field(default_factory=_utcnow)
+    is_live: bool = False
+
+
 class CallSummary(BaseModel):
     """`Call` minus `transcript`/`recording_url` — the list-shaped analytics
     surface is PII-free *by construction*, not by convention: on

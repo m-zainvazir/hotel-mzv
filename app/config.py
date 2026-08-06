@@ -268,6 +268,17 @@ class Settings(BaseSettings):
     #: (Phase 4) — chat transcripts carry guest names and phone numbers.
     chat_transcript_retention_days: int = 30
 
+    # --- test agent link (Phase 9.1, shared with Phase 9.3's voice tester) --
+    #: HMAC key signing shareable `/test/{token}` links
+    #: (`app/channels/test_links.py`). Unset falls back to
+    #: `widget_session_secret`, then a random per-process key — same
+    #: three-tier degradation `widget_session_secret` itself uses, so a
+    #: leaked test link still can't be replayed as a widget session (or vice
+    #: versa) even when both end up on the same fallback secret, since the
+    #: two claim sets are entirely different shapes.
+    test_link_secret: str | None = None
+    test_link_ttl_seconds: int = 86400
+
     # --- rate limiting (Phase 7) --------------------------------------------
     #: In-process, per-replica (see app/channels/ratelimit.py's docstring for
     #: why that's the deliberate limit, not an oversight).

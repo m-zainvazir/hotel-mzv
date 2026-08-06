@@ -8,7 +8,7 @@ text. It must never be spoken, and the call it describes must still run.
 from __future__ import annotations
 
 from app.brain.runner import stream_turn
-from app.brain.sanitize import InlineToolCallFilter, extract_inline_tool_calls
+from app.brain.sanitize import InlineToolCallFilter, extract_inline_tool_calls, extract_urls
 from app.db.memory_store import get_store
 from tests.conftest import ai
 
@@ -119,3 +119,37 @@ async def test_leaked_call_never_reaches_the_caller_and_still_executes(scripted,
 
     assert [e.tool for e in events if e.type == "tool_start"] == ["send_confirmation"]
     assert len(get_store().list_messages(hotel.tenant_id)) == 1
+
+
+class TestExtractUrls:
+    def test_finds_a_url_mentioned_in_a_sentence(self):
+        assert extract_urls("You can find that at https://example.com/careers.") == [
+            "https://example.com/careers"
+        ]
+
+    def test_trailing_sentence_punctuation_is_not_captured(self):
+        for text, expected in [
+            ("See https://example.com.", "https://example.com"),
+            ("Check (https://example.com)", "https://example.com"),
+            ('Quote: "https://example.com"', "https://example.com"),
+            ("List: https://example.com, https://other.com.", None),
+        ]:
+            if expected is not None:
+                assert extract_urls(text) == [expected]
+
+    def test_multiple_distinct_urls_in_order(self):
+        text = "Try https://a.example.com or https://b.example.com instead."
+        assert extract_urls(text) == ["https://a.example.com", "https://b.example.com"]
+
+    def test_a_repeated_url_is_deduplicated(self):
+        text = "Go to https://example.com now. Again, https://example.com."
+        assert extract_urls(text) == ["https://example.com"]
+
+    def test_no_urls_returns_an_empty_list(self):
+        assert extract_urls("There is nothing to link here.") == []
+
+    def test_http_and_https_both_match(self):
+        assert extract_urls("http://example.com and https://example.com") == [
+            "http://example.com",
+            "https://example.com",
+        ]

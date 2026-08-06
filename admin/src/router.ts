@@ -12,7 +12,8 @@ export type Tab =
   | "chats"
   | "jobs"
   | "escalations"
-  | "knowledge";
+  | "knowledge"
+  | "versions";
 
 export type Route =
   | { name: "overview" }
@@ -28,6 +29,7 @@ const VALID_TABS: Tab[] = [
   "jobs",
   "escalations",
   "knowledge",
+  "versions",
 ];
 
 function parse(hash: string): Route {
