@@ -872,13 +872,27 @@ deployment item.
   `offer_actions` buttons; the Railway switch.
 - ✅ **9.2**: card carousel, model-authored buttons/quick replies, the
   opening turn, the public share link.
-- ❌ **The entire deterministic flow engine has never run live** — `flows`,
-  `start_flow`, `flow:` postbacks, `chat.menu_flow`, and the checkpointer
-  write-back. Offline tests use an in-memory checkpointer, so the "next turn
-  remembers the flow" guarantee is unproven against real Postgres. This is
-  the largest outstanding gap in either phase.
-- ❌ Channel flags, `handoff` → a real `escalate`, and `ui.allowed_hosts` /
-  scheme rejection are all offline-only.
+- ✅ **The deterministic flow engine, live-verified 2026-08-07** against the
+  real Supabase project with `checkpointer: "postgres"`, on a scratch tenant
+  (`zz-flow-check`) since archived and purged. Each claim proven
+  individually: `chat.menu_flow`'s buttons come back from the handshake (and
+  correctly suppress `opening_turn`); a `flow:` postback renders the node's
+  configured wording with its buttons in configured order at
+  **`llm_requests: 0`**; the `aupdate_state` write-back survives real
+  Postgres — a free-text turn in the same session repeated the flow's text
+  **verbatim**, which is exactly what an in-memory-checkpointer test cannot
+  demonstrate; `start_flow` routes free text into a flow at
+  `llm_requests: 1` with nothing appended (a loop back to `reason` would
+  have made it 2 plus a trailing sentence, so this is the graph edge
+  working); a stale postback falls through to an ordinary model turn rather
+  than dead-ending; and a postback naming another tenant's flow id does not
+  cross over (playmouth2 answered from its own config).
+- ✅ **`ui.allowed_hosts` live-verified** the same way: with
+  `allowed_hosts: ["example.com"]` and a prompt instructing the model to
+  offer both an on-list and an off-list URL, only the on-list button
+  rendered, with a matching `rejected button url` WARNING from
+  `app/flows/urls.py`.
+- ❌ Channel flags and `handoff` → a real `escalate` are still offline-only.
 - ⚠️ **A known live quality issue:** the model frequently restates itself
   across a tool hop ("I can check with a bookseller…" twice). Scoping the
   "speak before acting" rule away from the instant presentation tools cut it
