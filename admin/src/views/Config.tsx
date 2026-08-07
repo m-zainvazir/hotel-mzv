@@ -513,8 +513,21 @@ export function ConfigView({ tenantId, session }: { tenantId: string; session: S
         {saving ? "Saving…" : "Save draft"}
       </button>
 
+      {/* DangerZone reads the LIVE status, never the effective
+          (draft-preferred) one. Archive and Restore act on the live row
+          immediately via `set_tenant_status` — deliberately, since a
+          lifecycle change isn't a config edit and shouldn't wait for a
+          deploy. Passing `config.status` meant that on any bot with an
+          unpublished draft, archiving succeeded but the panel kept showing
+          "Archive" and left Purge greyed out forever, because the draft
+          still said "active". The two disagree the moment a draft exists. */}
       {isOperator && (
-        <DangerZone tenantId={tenantId} status={config.status as string} onChanged={load} />
+        <DangerZone
+          tenantId={tenantId}
+          status={detail.live_config.status as string}
+          hasDraft={detail.has_draft}
+          onChanged={load}
+        />
       )}
     </div>
   );
@@ -523,10 +536,13 @@ export function ConfigView({ tenantId, session }: { tenantId: string; session: S
 function DangerZone({
   tenantId,
   status,
+  hasDraft,
   onChanged,
 }: {
+  /** The LIVE status — see the call site. */
   tenantId: string;
   status: string;
+  hasDraft: boolean;
   onChanged: () => void;
 }) {
   const [busy, setBusy] = useState(false);
@@ -587,6 +603,15 @@ function DangerZone({
               ? "Restoring flips status back to active — it answers on voice and chat again immediately."
               : "Archiving stops this bot answering on voice and chat. Every row (jobs, calls, transcripts) is kept — this is reversible."}
           </p>
+          {/* Archive/Restore skip the draft entirely, so an operator who
+              also has unsaved config edits isn't left wondering why the
+              status here doesn't match the Status field above. */}
+          {hasDraft && (
+            <p class="admin-muted">
+              This takes effect immediately on the live bot — it doesn't wait for a Deploy, and
+              your unpublished draft is left untouched.
+            </p>
+          )}
         </div>
         <button
           class="admin-btn admin-btn--secondary"
