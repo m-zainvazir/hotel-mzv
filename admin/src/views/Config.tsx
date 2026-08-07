@@ -744,24 +744,53 @@ function ListField({
   onChange: (v: string[]) => void;
   disabled?: boolean;
 }) {
+  // Holds the RAW text, not `values.join(", ")`.
+  //
+  // This was a controlled input whose displayed value was re-derived from
+  // the parsed array on every keystroke — so typing a comma produced
+  // ["a", ""], `filter(Boolean)` dropped the empty entry, and the field
+  // re-rendered as "a" with the comma erased. A trailing space went the
+  // same way. The net effect: a "(comma-separated)" field that physically
+  // could not accept a second item. It affects every list in this panel —
+  // emergency keywords, service aliases, allowed origins, MCP tool
+  // allowlists — not just the one it was reported on.
+  const [text, setText] = useState(values.join(", "));
+  const external = values.join(" ");
+
+  // Re-sync only when the incoming array genuinely differs from what the
+  // current text parses to — i.e. the config was replaced from outside
+  // (tenant switch, load, discard draft, revert). Mid-typing, "a," parses
+  // to ["a"] which still matches, so the keystroke survives.
+  useEffect(() => {
+    const local = parseList(text).join(" ");
+    if (local !== external) {
+      setText(values.join(", "));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [external]);
+
   return (
     <div class="admin-field">
       <label>{label} (comma-separated)</label>
       <input
         type="text"
-        value={values.join(", ")}
+        value={text}
         disabled={disabled}
-        onInput={(e) =>
-          onChange(
-            (e.target as HTMLInputElement).value
-              .split(",")
-              .map((s) => s.trim())
-              .filter(Boolean),
-          )
-        }
+        onInput={(e) => {
+          const raw = (e.target as HTMLInputElement).value;
+          setText(raw);
+          onChange(parseList(raw));
+        }}
       />
     </div>
   );
+}
+
+function parseList(raw: string): string[] {
+  return raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
 }
 
 function HoursSection({
