@@ -892,7 +892,29 @@ deployment item.
   offer both an on-list and an off-list URL, only the on-list button
   rendered, with a matching `rejected button url` WARNING from
   `app/flows/urls.py`.
-- ❌ Channel flags and `handoff` → a real `escalate` are still offline-only.
+- ✅ **Channel flags live-verified** both directions: `chat.enabled=false` →
+  `/chat/session` AND `/bot/{key}` both 404; re-enabling restores 200 on the
+  next deploy. (A first attempt appeared to show that re-enabling was
+  impossible — that was the *test harness* mangling the default holding
+  message's em-dash into a UTF-16 surrogate under Windows cp1252, which
+  httpx then refused to encode. When driving this admin API from a shell on
+  Windows, force `PYTHONIOENCODING=utf-8` and pass `encoding=` to every
+  open() — otherwise a round-trip of any tenant config corrupts it.)
+- ✅ **`escalate` live-verified on chat**: a "get me a human" turn emitted a
+  `handoff` event carrying a real `escalation_id` + destination, and the
+  `escalations` table recorded the row. The SMS half cannot fire — Twilio is
+  deliberately off (`notifications.provider: "stub"`), a client decision,
+  not a gap.
+
+**Phase 9.1 and 9.2 are both complete and live-verified.** Open items are
+quality/decision, not missing function:
+- ⚠️ The cross-tool-hop restatement (see above) is still the one real
+  quality defect.
+- ⏸️ `prompt_augmentation` still ships both behaviours pending a decision.
+- A `ListField` fix (every comma-separated field in the panel could only
+  ever hold one item — the input re-derived its text from the parsed array
+  each keystroke and ate the comma) is shipped but not yet clicked in a
+  browser.
 - ⚠️ **A known live quality issue:** the model frequently restates itself
   across a tool hop ("I can check with a bookseller…" twice). Scoping the
   "speak before acting" rule away from the instant presentation tools cut it
