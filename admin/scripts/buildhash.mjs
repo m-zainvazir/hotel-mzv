@@ -39,11 +39,22 @@ const relativePaths = collectFiles(SRC_DIR)
   .map((absolute) => relative(ROOT, absolute).replaceAll("\\", "/"))
   .sort();
 
+// CRLF -> LF before hashing. Git on Windows checks these files out with
+// CRLF while storing LF, so hashing raw bytes made the digest depend on
+// which machine ran the build: it matched locally and differed on the Linux
+// CI runner reading the same commit. Identical content, different bytes,
+// and a red CI complaining the bundle was "stale" when it was perfectly
+// fresh. tests/test_admin_bundle.py normalises identically — change one and
+// you must change the other.
+function normaliseEol(buffer) {
+  return Buffer.from(buffer.toString("latin1").replaceAll("\r\n", "\n"), "latin1");
+}
+
 const digest = createHash("sha256");
 for (const relativePath of relativePaths) {
   digest.update(relativePath, "utf-8");
   digest.update("\0", "utf-8");
-  digest.update(readFileSync(join(ROOT, relativePath)));
+  digest.update(normaliseEol(readFileSync(join(ROOT, relativePath))));
 }
 
 if (!existsSync(DIST_DIR)) {

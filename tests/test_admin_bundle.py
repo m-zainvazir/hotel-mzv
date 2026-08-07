@@ -22,6 +22,19 @@ ADMIN_SRC_DIR = ADMIN_ROOT / "src"
 BUILDHASH_PATH = ADMIN_ROOT / "dist" / ".buildhash"
 
 
+def _normalise_eol(raw: bytes) -> bytes:
+    """CRLF -> LF before hashing.
+
+    Git on Windows checks these sources out with CRLF while storing LF, so
+    hashing raw bytes made the digest depend on which machine built the
+    bundle: green locally, red on the Linux CI runner reading the identical
+    commit, with a message claiming the bundle was stale when it was
+    perfectly fresh. The Node side (scripts/buildhash.mjs) normalises
+    identically — change one and you must change the other.
+    """
+    return raw.replace(b"\r\n", b"\n")
+
+
 def _computed_hash() -> str:
     # Paths are relative to admin/ (e.g. "src/App.tsx"), matching
     # buildhash.mjs's own `relative(ROOT, ...)` where ROOT is the admin/
@@ -39,7 +52,7 @@ def _computed_hash() -> str:
     for relative_path in relative_paths:
         digest.update(relative_path.encode("utf-8"))
         digest.update(b"\0")
-        digest.update((ADMIN_ROOT / relative_path).read_bytes())
+        digest.update(_normalise_eol((ADMIN_ROOT / relative_path).read_bytes()))
     return digest.hexdigest()
 
 
