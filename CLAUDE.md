@@ -365,10 +365,14 @@ command; **`0009`'s trigger fix is proven defused live** (an unrelated save on a
 tenant that *has* a `voice_id` succeeds — see the gotcha below); removing a
 service deletes the orphan row; `sync_tenants` refuses to stomp live config
 without `--force` and `--export` round-trips semantically identical config; the
-admin limiter 429s with `Retry-After`. The one thing still not done is the
-*deployment switch*: `ADMIN_ENABLED` / `ADMIN_AUTH_TOKEN` / `TENANT_SOURCE` are
-not yet set on Railway, and must be set **together** or the phantom-edit
-preflight crashes the boot in between. Scope narrowed from plan §15's original
+admin limiter 429s with `Retry-After`. The *deployment switch* — `ADMIN_ENABLED`
+/ `ADMIN_AUTH_TOKEN` / `TENANT_SOURCE`, which must be set **together** or the
+phantom-edit preflight crashes the boot in between — **is now set on Railway**
+(done during Phase 9.1; confirmed 2026-08-08: production `/admin/api/session`
+401s with `invalid or missing bearer token`, i.e. a real token is loaded, not
+the unconfigured message, and production serves a tenant that exists only in
+Supabase). Note the Railway `ADMIN_AUTH_TOKEN` and the local `.env` one are
+different values; nothing requires them to match. Scope narrowed from plan §15's original
 "avatar + analytics + admin"
 by client decision — the video avatar moved to `plans/phase10.md` item 13, and a
 Supabase-Auth per-tenant login mini-plan went in beside it as item 14.
@@ -908,21 +912,22 @@ deployment item.
 
 **Phase 9.1 and 9.2 are both complete and live-verified.** Open items are
 quality/decision, not missing function:
-- ⚠️ The cross-tool-hop restatement (see above) is still the one real
-  quality defect.
-- ⏸️ `prompt_augmentation` still ships both behaviours pending a decision.
+- ✅ **The cross-tool-hop restatement is fixed** (Phase 9.3 Step 0 item 1) —
+  `RepeatSuppressor` was rewritten to compare **per sentence** against every
+  sentence spoken this turn. See the gotcha below for the two structural
+  bugs and the three guards that let the threshold drop to 0.7 safely.
+  Offline-proven (21 tests, five of which were verified to fail against the
+  old implementation); **not yet confirmed on a live turn** — the remaining
+  reworded-mid-stream case is documented, not solved.
+- ⏸️ `prompt_augmentation` still ships both behaviours pending a decision —
+  say "lock prompt augmentation to auto_append/placeholder_only".
 - A `ListField` fix (every comma-separated field in the panel could only
   ever hold one item — the input re-derived its text from the parsed array
   each keystroke and ate the comma) is shipped but not yet clicked in a
   browser.
-- ⚠️ **A known live quality issue:** the model frequently restates itself
-  across a tool hop ("I can check with a bookseller…" twice). Scoping the
-  "speak before acting" rule away from the instant presentation tools cut it
-  from ~4/5 turns to ~1/3, but it is not solved. `RepeatSuppressor` only
-  guards the *first* sentence of a segment, which structurally cannot catch
-  a restatement that appears later in it.
-- ⏸️ `prompt_augmentation` still ships both behaviours pending a decision —
-  say "lock prompt augmentation to auto_append/placeholder_only".
+- Scratch tenants from 9.1/9.2 testing are still in the tenant list
+  (`new-cringe-1`, `playmouth1`, `test-clinic`, `flow-test`) — archive/purge
+  through the Part B lifecycle path when done with them.
 
 ## Gotchas learned the hard way
 - **`/widget.js` must send `Cache-Control: no-cache`, never `immutable`.**
@@ -1035,10 +1040,37 @@ quality/decision, not missing function:
   router without a latency measurement justifying it.
 - **`caller` and `booking_draft` are declared but unwritten.** Deliberate — see the note in
   `app/brain/state.py`. Populate them in Phase 3 when resuming a dropped call needs them.
-- **Groq restates its own acknowledgement after a tool returns**, usually truncated. Fine in
-  text, jarring aloud, so `RepeatSuppressor` (`app/brain/sanitize.py`) drops it. It compares
-  the first sentence of the new segment against what was just said and fails *safe* — when
-  unsure it speaks the text.
+- **Models restate their own acknowledgement after a tool returns**, usually truncated.
+  Fine in text, jarring aloud, so `RepeatSuppressor` (`app/brain/sanitize.py`) drops it.
+  Its first version compared only **the first sentence of the new segment against the
+  whole previous segment concatenated**, and both halves of that were wrong — this is
+  what kept the defect alive at ~1/3 of turns after the prompt fix took it down from
+  ~4/5:
+  - *Targets must be individual sentences.* A restatement of one sentence scored poorly
+    against the concatenation of all of them, so the similarity test never fired. This
+    was the dominant live failure, and it got worse the more the model said before
+    calling a tool.
+  - *Every sentence of the new segment must be checked.* The echo routinely lands behind
+    a short opener ("Sure. I can check with a bookseller…"), which a first-sentence-only
+    check structurally cannot see no matter how good the comparison is.
+
+  Lowering the threshold to 0.7 to catch reworded restatements needs three guards, or it
+  eats real content — **"I've booked that for you" scores 0.85 against "I can book that
+  for you"**, and that is the one sentence a caller must not miss:
+  1. a truncation of something already said is dropped unconditionally (it contains
+     nothing new by definition);
+  2. anything introducing a **novel content word** is kept — "…for **Wednesday** too" is
+     a new request, not an echo. This also protects most tense changes for free
+     ("sent" ∉ "send");
+  3. anything **reporting completion** (`i've|we've <verb>`, "all set", "is confirmed")
+     is never dropped on similarity alone. `we've got` is excluded — inventory-speak,
+     not completion.
+
+  Still fails *safe*: when unsure it speaks. **Known limitation, deliberate:** a reworded
+  restatement is only caught when enough of the sentence arrives to compare, because the
+  fast path releases text the moment it can't be a prefix of anything — holding every
+  sentence to its boundary would spend the §13 latency budget on every turn to fix a
+  fraction of one.
 - **Tool events must never reach `delta.content`** on the voice channel, or the caller hears
   raw tool output read aloud. Only `token` / `acknowledgement` become audio.
 - **Voice thread id is the Vapi call id**, and history is reseeded from Vapi's transcript

@@ -163,51 +163,124 @@ def _normalise(text: str) -> str:
     return " ".join(re.sub(r"[^a-z0-9 ]+", " ", text.lower()).split())
 
 
-def _split_first_sentence(text: str) -> tuple[str, str]:
-    match = _SENTENCE_END.search(text)
-    if not match:
-        return text, ""
-    cut = match.end()
-    return text[:cut], text[cut:]
+def _sentences(text: str) -> list[str]:
+    """Split into sentences, keeping a trailing fragment that never terminated."""
+    out: list[str] = []
+    rest = text
+    while rest:
+        match = _SENTENCE_END.search(rest)
+        if not match:
+            out.append(rest)
+            break
+        out.append(rest[: match.end()])
+        rest = rest[match.end() :]
+    return [s for s in (part.strip() for part in out) if s]
+
+
+#: Function words carry no information to duplicate, so they're ignored when
+#: asking "does this sentence say anything the earlier one didn't?".
+_STOPWORDS = frozenset(
+    """a an and are as at be been being but by can could d did do does done for from get go
+    going got had has have he her here him his i if in into is it its just let lets like ll m
+    me my of ok okay on one or our out over please re right s she so some sure t that the
+    their them then there they this to too up us ve want was we well were what when which
+    while will with would you your about all also any back now thanks thank am""".split()
+)
+
+#: A sentence reporting that the action already happened is never a repeat of
+#: the promise to do it — "I've booked that for you" scores 0.85 against "I can
+#: book that for you", which is exactly the confirmation a caller must hear.
+#: "we've got" is excluded because it's inventory-speak ("let me check what
+#: we've got"), not a report of completion.
+_REPORTS_COMPLETION = re.compile(
+    r"\b(?:i|we) (?:ve|have) (?!got\b)\w+|\ball set\b|\b(?:has|have) been\b|\bis confirmed\b"
+)
+
+
+def _content_words(normalised: str) -> set[str]:
+    return {word for word in normalised.split() if word not in _STOPWORDS and len(word) > 2}
 
 
 class RepeatSuppressor:
-    """Drops a re-spoken acknowledgement at the start of a reply segment.
+    """Drops sentences the model has already said earlier in the same turn.
 
-    Observed live on Llama 3.3: having said "Let me check what we've got
-    available for you" and called a tool, it opens the follow-up with "Let me
-    check what we've got…" — a *truncated* restatement, not a verbatim one, so
-    an exact-match check misses it. In text it reads as a stutter; spoken aloud
-    it's jarring, and prompt instructions don't reliably prevent it.
+    Observed live on Llama 3.3, and still on Gemini: having said "Let me check
+    what we've got available for you" and called a tool, it opens the follow-up
+    with "Let me check what we've got…" — a *truncated* restatement, not a
+    verbatim one, so an exact-match check misses it. In text it reads as a
+    stutter; spoken aloud it's jarring, and prompt instructions don't reliably
+    prevent it (scoping the "speak before acting" rule away from the instant
+    presentation tools cut it from ~4/5 turns to ~1/3, and no further).
 
-    Arm this after a tool hop with whatever was just said. The first sentence of
-    the new segment is dropped when it's clearly the same utterance — either one
-    is a prefix of the other, or they're near-identical.
+    Arm this after a tool hop with whatever was just said. Two things about the
+    comparison are load-bearing, and the original version got both wrong:
 
-    Two safeguards keep it from eating real content:
+    * **Targets are individual sentences, not one concatenated blob.** Arming
+      with a whole multi-sentence segment meant a restatement of *one* of those
+      sentences scored poorly against the concatenation of all of them and
+      survived. This was the dominant live failure.
+    * **Every sentence in the new segment is checked, not just the first.** The
+      restatement frequently lands after an opener ("Sure. I can check with a
+      bookseller…"), which the old first-sentence-only check structurally could
+      not see.
 
-    * anything that can't be a restatement is released immediately, so genuinely
-      new wording is never delayed;
-    * short openers ("Okay.") are left alone, since they carry no information to
-      duplicate and are common as genuine sentence starters.
+    Four safeguards keep it from eating real content — it fails *safe*, and
+    when unsure it speaks:
+
+    * anything that can't be a restatement is released immediately, so
+      genuinely new wording is never delayed;
+    * short sentences ("Okay.") are never remembered as targets, since they
+      carry no information to duplicate and are normal ways to start;
+    * a sentence introducing a content word the target didn't have is kept —
+      "Let me check what we've got for **Wednesday** too" is a new request, not
+      an echo;
+    * a sentence *reporting completion* is never dropped on similarity alone.
+      "I've booked that for you" scores 0.85 against "I can book that for you",
+      and it is the one sentence in the turn a caller must not miss.
+
+    Known limitation, stated rather than papered over: a *reworded* restatement
+    ("I can check with a bookseller" → "Let me check with a bookseller") is only
+    caught when enough of the sentence arrives to compare — the fast path
+    releases text the moment it can't be a prefix of anything, because holding
+    every sentence to its boundary would cost the §13 latency budget on every
+    turn to fix a fraction of one. Near-verbatim restatements, which are the
+    common shape, are caught either way.
     """
 
     #: Don't hold more than this many characters waiting for a sentence to end.
     MAX_HOLD = 160
-    #: Below this, an opener is too short to confidently call a repeat.
+    #: Below this, a sentence is too short to confidently call a repeat.
     MIN_MATCH = 12
-    #: Similarity above which two near-identical sentences count as the same.
-    SIMILARITY = 0.8
+    #: Similarity above which two sentences count as the same utterance. Lower
+    #: than the original 0.8 because the novel-content-word and
+    #: reports-completion guards below now carry the false-positive load that
+    #: the threshold alone used to.
+    SIMILARITY = 0.7
+    #: Cap on remembered sentences, so a long turn can't grow this unbounded.
+    MAX_TARGETS = 24
 
     def __init__(self) -> None:
-        self._target = ""
+        #: Normalised sentences already spoken this turn, oldest first.
+        self._targets: list[str] = []
+        #: The part of the current sentence not yet released.
         self._buffer = ""
+        #: The part of the current sentence already released. Non-empty means
+        #: this sentence is committed — we can't unsay it, so the rest of it
+        #: streams straight through and only the *next* sentence is judged.
+        self._said = ""
         self._active = False
 
     def arm(self, previously_spoken: str) -> None:
-        self._target = _normalise(previously_spoken)
+        """Remember what was just said and start judging what comes next.
+
+        Additive: targets accumulate across every tool hop in the turn, so a
+        sentence from before the first hop still suppresses an echo of it three
+        hops later.
+        """
+        self._remember(previously_spoken)
         self._buffer = ""
-        self._active = len(self._target) >= self.MIN_MATCH
+        self._said = ""
+        self._active = bool(self._targets)
 
     def feed(self, text: str) -> str:
         """Consume a chunk; return what's safe to say now."""
@@ -215,50 +288,92 @@ class RepeatSuppressor:
             return text
         if not text:
             return ""
-
         self._buffer += text
-        candidate = _normalise(self._buffer)
-        if not candidate:
-            return ""
-
-        # Fast path: once it can't be a restatement either way, stop holding.
-        if not (self._target.startswith(candidate) or candidate.startswith(self._target)):
-            return self._release()
-
-        if not _SENTENCE_END.search(self._buffer):
-            # Held as long as is reasonable with no sentence boundary in sight.
-            # We can't tell where the restatement ends, so say all of it rather
-            # than risk swallowing real content.
-            return "" if len(self._buffer) < self.MAX_HOLD else self._release()
-
-        return self._decide()
+        return self._drain(final=False)
 
     def flush(self) -> str:
-        # At flush the segment is complete, so the buffer *is* the sentence
-        # even without a terminator.
-        return self._decide() if self._active else self._release()
-
-    def _decide(self) -> str:
-        self._active = False
-        buffer, self._buffer = self._buffer, ""
-        head, tail = _split_first_sentence(buffer)
-        return tail.lstrip() if self._is_repeat(_normalise(head)) else buffer
-
-    def _is_repeat(self, head: str) -> bool:
-        """Is `head` the same utterance as what was just said?
-
-        No length floor here — `arm()` already refuses to engage on a target too
-        short to duplicate meaningfully, and the prefix/similarity tests are
-        what actually keep unrelated openers safe.
-        """
-        if not head:
-            return False
-        if head.startswith(self._target) or self._target.startswith(head):
-            return True
-        return SequenceMatcher(None, head, self._target).ratio() >= self.SIMILARITY
-
-    def _release(self) -> str:
-        out = self._buffer
+        """End of segment: the buffer is a complete sentence even unterminated."""
+        if not self._active:
+            return ""
+        out = self._drain(final=True)
         self._buffer = ""
-        self._active = False
+        self._said = ""
         return out
+
+    def _drain(self, final: bool) -> str:
+        out: list[str] = []
+
+        # Complete sentences first — each is judged on its own.
+        while self._buffer:
+            match = _SENTENCE_END.search(self._buffer)
+            if not match:
+                break
+            head = self._buffer[: match.end()]
+            self._buffer = self._buffer[match.end() :]
+            sentence = self._said + head
+            committed = bool(self._said)
+            self._said = ""
+            if committed or not self._is_repeat(_normalise(sentence)):
+                out.append(head)
+                self._remember(sentence)
+
+        if not self._buffer:
+            return "".join(out)
+
+        # A trailing fragment with no terminator in sight.
+        if self._said:
+            # Already streaming this sentence — pass it through, but keep the
+            # full text so it can be remembered once it ends.
+            self._said += self._buffer
+            out.append(self._buffer)
+            self._buffer = ""
+        elif final:
+            sentence, self._buffer = self._buffer, ""
+            if not self._is_repeat(_normalise(sentence)):
+                out.append(sentence)
+                self._remember(sentence)
+        elif len(self._buffer) >= self.MAX_HOLD or not self._could_repeat(_normalise(self._buffer)):
+            # Either it can no longer become a restatement of anything, or
+            # we've held as long as is reasonable with no boundary in sight.
+            # Say it rather than risk swallowing real content.
+            self._said, self._buffer = self._buffer, ""
+            out.append(self._said)
+
+        return "".join(out)
+
+    def _remember(self, text: str) -> None:
+        for sentence in _sentences(text):
+            normalised = _normalise(sentence)
+            if len(normalised) >= self.MIN_MATCH and normalised not in self._targets:
+                self._targets.append(normalised)
+        del self._targets[: -self.MAX_TARGETS]
+
+    def _could_repeat(self, candidate: str) -> bool:
+        """Is this partial sentence still shadowing something already said?"""
+        if not candidate:
+            return True
+        return any(
+            target.startswith(candidate) or candidate.startswith(target) for target in self._targets
+        )
+
+    def _is_repeat(self, candidate: str) -> bool:
+        if not candidate:
+            return False
+        return any(self._matches(candidate, target) for target in self._targets)
+
+    def _matches(self, candidate: str, target: str) -> bool:
+        # A truncation of something already said contains nothing new by
+        # definition, so it needs no further guard.
+        if target.startswith(candidate):
+            return True
+        if candidate.startswith(target):
+            # An extension, though, may be carrying the new part in its tail.
+            return not self._adds_anything(candidate, target)
+        if SequenceMatcher(None, candidate, target).ratio() < self.SIMILARITY:
+            return False
+        return not self._adds_anything(candidate, target)
+
+    def _adds_anything(self, candidate: str, target: str) -> bool:
+        if _REPORTS_COMPLETION.search(candidate):
+            return True
+        return bool(_content_words(candidate) - _content_words(target))
