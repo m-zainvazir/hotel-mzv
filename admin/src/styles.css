@@ -324,25 +324,18 @@ table.admin-table tr:hover td {
   color: var(--admin-danger);
 }
 
-.admin-section--draft-banner,
-.admin-section--deploy-confirm {
+.admin-section--draft-banner {
   border-color: #f59e0b;
   background: #fef3c7;
   color: #92400e;
 }
 
 @media (prefers-color-scheme: dark) {
-  .admin-section--draft-banner,
-  .admin-section--deploy-confirm {
+  .admin-section--draft-banner {
     background: #451a03;
     color: #fdba74;
     border-color: #b45309;
   }
-}
-
-.admin-section--deploy-confirm ul {
-  margin: 0.5rem 0;
-  padding-left: 1.25rem;
 }
 
 .admin-danger-row {

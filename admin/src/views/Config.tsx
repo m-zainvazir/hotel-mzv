@@ -4,7 +4,6 @@ import {
   ApiError,
   archiveTenant,
   createTestLink,
-  deployTenant,
   discardDraft,
   getTenantConfig,
   purgeTenant,
@@ -159,7 +158,18 @@ function diffTopLevelKeys(draft: TenantConfig, live: TenantConfig): string[] {
   return changed.sort();
 }
 
-export function ConfigView({ tenantId, session }: { tenantId: string; session: SessionInfo }) {
+export function ConfigView({
+  tenantId,
+  session,
+  onDraftChanged,
+}: {
+  tenantId: string;
+  session: SessionInfo;
+  //: Saving or discarding a draft here changes what the header's "Deploy
+  //: Agent" button should say (it carries a • when a draft exists). The
+  //: header holds its own fetched copy, so it has to be told.
+  onDraftChanged?: () => void;
+}) {
   const isOperator = session.kind === "operator";
   const [detail, setDetail] = useState<TenantDetail | null>(null);
   const [config, setConfig] = useState<TenantConfig | null>(null);
@@ -167,9 +177,6 @@ export function ConfigView({ tenantId, session }: { tenantId: string; session: S
   const [fieldErrors, setFieldErrors] = useState<FieldErrors>(new Map());
   const [saving, setSaving] = useState(false);
   const [savedNotice, setSavedNotice] = useState(false);
-  const [deployOpen, setDeployOpen] = useState(false);
-  const [deployNote, setDeployNote] = useState("");
-  const [deploying, setDeploying] = useState(false);
 
   function load(): void {
     setConfig(null);
@@ -196,6 +203,7 @@ export function ConfigView({ tenantId, session }: { tenantId: string; session: S
       setDetail(saved);
       setConfig(saved.config);
       setSavedNotice(true);
+      onDraftChanged?.();
     } catch (err) {
       if (err instanceof ApiError && err.status === 422) {
         setFieldErrors(parseFieldErrors(err.detail));
@@ -213,31 +221,15 @@ export function ConfigView({ tenantId, session }: { tenantId: string; session: S
     }
   }
 
-  async function doDeploy(): Promise<void> {
-    setDeploying(true);
+  // Deploying deliberately does NOT live here. There is exactly one publish
+  // path — the header's "Deploy Agent" dialog — because two of them meant two
+  // independently-fetched copies of `has_draft`: deploying from the header
+  // left this tab's "Draft — not live" banner on screen against a bot that no
+  // longer had a draft, which reads as a failed deploy.
+  async function previewDraft(): Promise<void> {
     setError(null);
     try {
-      const updated = await deployTenant(tenantId, deployNote);
-      setDetail(updated);
-      setConfig(updated.config);
-      setDeployOpen(false);
-      setDeployNote("");
-      setSavedNotice(false);
-      // Confirm the publish landed by opening the real, live link — the
-      // same one the header's Test Agent button mints — right away rather
-      // than making you click over and mint it yourself.
-      void mintAndOpenTestLink("live");
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : "deploy failed");
-    } finally {
-      setDeploying(false);
-    }
-  }
-
-  async function mintAndOpenTestLink(variant: "live" | "draft"): Promise<void> {
-    setError(null);
-    try {
-      const { url } = await createTestLink(tenantId, "chat", variant);
+      const { url } = await createTestLink(tenantId, "chat", "draft");
       window.open(url, "_blank", "noopener");
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "could not create a test link");
@@ -252,6 +244,7 @@ export function ConfigView({ tenantId, session }: { tenantId: string; session: S
       setDetail(updated);
       setConfig(updated.config);
       setSavedNotice(false);
+      onDraftChanged?.();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "could not discard draft");
     } finally {
@@ -280,71 +273,19 @@ export function ConfigView({ tenantId, session }: { tenantId: string; session: S
         <div class="admin-section admin-section--draft-banner">
           <strong>Draft — not live.</strong>{" "}
           {diffKeys.length} section{diffKeys.length === 1 ? "" : "s"} changed since the live
-          version{diffKeys.length > 0 && `: ${diffKeys.join(", ")}`}.
+          version{diffKeys.length > 0 && `: ${diffKeys.join(", ")}`}. Publish it with{" "}
+          <strong>▶ Deploy Agent</strong> at the top of this page.
           <div class="admin-field-row" style={{ marginTop: "0.5rem" }}>
             <button
-              class="admin-btn"
-              onClick={() => setDeployOpen(true)}
-              disabled={saving || deploying || !isOperator}
-              title={!isOperator ? "operator only" : undefined}
-            >
-              Deploy…
-            </button>
-            <button
               class="admin-btn admin-btn--secondary"
-              onClick={() => mintAndOpenTestLink("draft")}
-              disabled={saving || deploying}
+              onClick={previewDraft}
+              disabled={saving}
               title="Chat with the bot exactly as this draft would behave — before publishing it"
             >
               Preview draft
             </button>
-            <button
-              class="admin-btn admin-btn--secondary"
-              onClick={doDiscard}
-              disabled={saving || deploying}
-            >
+            <button class="admin-btn admin-btn--secondary" onClick={doDiscard} disabled={saving}>
               Discard draft
-            </button>
-          </div>
-        </div>
-      )}
-
-      {deployOpen && (
-        <div class="admin-section admin-section--deploy-confirm">
-          <h2>Deploy this draft?</h2>
-          <p class="admin-muted">
-            This publishes the draft live — the running bot answers with it on the very next
-            turn.
-          </p>
-          {diffKeys.length > 0 ? (
-            <ul>
-              {diffKeys.map((key) => (
-                <li key={key}>
-                  <code>{key}</code> changed
-                </li>
-              ))}
-            </ul>
-          ) : (
-            <p class="admin-muted">No changes detected against the live version.</p>
-          )}
-          <div class="admin-field">
-            <label>Note (optional)</label>
-            <input
-              type="text"
-              value={deployNote}
-              onInput={(e) => setDeployNote((e.target as HTMLInputElement).value)}
-            />
-          </div>
-          <div class="admin-field-row">
-            <button class="admin-btn" onClick={doDeploy} disabled={deploying}>
-              {deploying ? "Deploying…" : "Confirm deploy"}
-            </button>
-            <button
-              class="admin-btn admin-btn--secondary"
-              onClick={() => setDeployOpen(false)}
-              disabled={deploying}
-            >
-              Cancel
             </button>
           </div>
         </div>
@@ -367,7 +308,8 @@ export function ConfigView({ tenantId, session }: { tenantId: string; session: S
       {error && <div class="admin-error-banner">{error}</div>}
       {savedNotice && (
         <div class="admin-tile" style={{ marginBottom: "1rem" }}>
-          Saved as a draft — not live until you deploy it above.
+          Saved as a draft — not live until you publish it with ▶ Deploy Agent at the top of
+          this page.
         </div>
       )}
 

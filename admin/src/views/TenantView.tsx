@@ -32,11 +32,25 @@ export function TenantView({
   tab: Tab;
   session: SessionInfo;
 }) {
+  // Deploying happens in exactly one place — the header's Deploy Agent
+  // dialog — but the tab views each hold their own fetched copy of the
+  // tenant detail. Without a nudge, deploying from the header left the
+  // Config tab's "Draft — not live" banner on screen against a bot that no
+  // longer had a draft. Bumping the key remounts the active tab, which
+  // refetches; `headerKey` is the mirror image, so saving or discarding a
+  // draft in a tab keeps the header's Deploy Agent • marker honest.
+  const [tabKey, setTabKey] = useState(0);
+  const [headerKey, setHeaderKey] = useState(0);
+
   return (
     <div>
       <div class="admin-tenant-header">
         <h1>{tenantId}</h1>
-        <HeaderActions tenantId={tenantId} />
+        <HeaderActions
+          key={headerKey}
+          tenantId={tenantId}
+          onDeployed={() => setTabKey((n) => n + 1)}
+        />
       </div>
       <nav class="admin-tabs">
         {TABS.map((entry) => (
@@ -49,19 +63,27 @@ export function TenantView({
           </a>
         ))}
       </nav>
-      {tab === "metrics" && <MetricsView tenantId={tenantId} />}
-      {tab === "config" && <ConfigView tenantId={tenantId} session={session} />}
-      {tab === "prompt" && <SystemPromptView tenantId={tenantId} />}
-      {tab === "knowledge" && <KnowledgeView tenantId={tenantId} />}
-      {tab === "versions" && <VersionsView tenantId={tenantId} session={session} />}
-      {tab === "calls" && <CallsView tenantId={tenantId} />}
-      {tab === "chats" && <ChatsView tenantId={tenantId} />}
-      {(tab === "jobs" || tab === "escalations") && <JobsEscalationsView tenantId={tenantId} />}
+      <div key={tabKey}>
+        {tab === "metrics" && <MetricsView tenantId={tenantId} />}
+        {tab === "config" && (
+          <ConfigView
+            tenantId={tenantId}
+            session={session}
+            onDraftChanged={() => setHeaderKey((n) => n + 1)}
+          />
+        )}
+        {tab === "prompt" && <SystemPromptView tenantId={tenantId} />}
+        {tab === "knowledge" && <KnowledgeView tenantId={tenantId} />}
+        {tab === "versions" && <VersionsView tenantId={tenantId} session={session} />}
+        {tab === "calls" && <CallsView tenantId={tenantId} />}
+        {tab === "chats" && <ChatsView tenantId={tenantId} />}
+        {(tab === "jobs" || tab === "escalations") && <JobsEscalationsView tenantId={tenantId} />}
+      </div>
     </div>
   );
 }
 
-function HeaderActions({ tenantId }: { tenantId: string }) {
+function HeaderActions({ tenantId, onDeployed }: { tenantId: string; onDeployed?: () => void }) {
   // On every tab (it lives in the shared header, not a per-tab view) and
   // greyed per channel flag — 9.3's voice mode appears here with no
   // further UI work once it ships, by adding a second button/mode toggle.
@@ -132,7 +154,10 @@ function HeaderActions({ tenantId }: { tenantId: string }) {
             setDeployOpen(false);
             refresh();
           }}
-          onDeployed={refresh}
+          onDeployed={() => {
+            refresh();
+            onDeployed?.();
+          }}
         />
       )}
     </div>
