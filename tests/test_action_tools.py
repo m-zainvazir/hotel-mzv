@@ -531,3 +531,112 @@ class TestModelAuthoredButtons:
         assert [a["type"] for a in rendered] == ["reply", "link"]
         assert rendered[0]["value"] == "what are your hours?"
         assert rendered[1]["url"] == "https://example.com"
+
+
+class TestGraphTermination:
+    """The cure for the cross-tool-hop restatement, measured live against
+    production before it was written. Every availability turn came back as
+
+        "...nothing this evening, earliest is Sunday the 9th."   <- the answer
+        offer_actions                                            <- the buttons
+        "I'm afraid we don't have any openings this evening..."  <- restated
+
+    because `tools -> reason` handed the model another turn after a tool whose
+    only job was to render what it had *just said*. `RepeatSuppressor` can't
+    reach this — the wording differs every time. Removing the turn does.
+    """
+
+    async def test_a_presentation_hop_ends_the_turn(self, hotel, scripted):
+        """Scripting only ONE model response is the proof: if the graph looped
+        back to `reason`, ScriptedChatModel would raise "ran out of responses"
+        rather than the turn ending cleanly."""
+        from app.brain.runner import stream_turn
+
+        model = scripted(
+            ai(
+                "The earliest we have is Sunday at 10am.",
+                [{"name": "offer_actions", "args": {"buttons": [{"label": "Book Sunday"}]}}],
+            )
+        )
+        events = [
+            e
+            async for e in stream_turn(
+                text="anything tonight?", tenant_id=hotel.tenant_id, session_id="present-end"
+            )
+        ]
+
+        assert model.cursor == 1
+        assert not any(e.type == "error" for e in events)
+        spoken = "".join(e.text for e in events if e.is_spoken)
+        assert spoken == "The earliest we have is Sunday at 10am."
+        assert [e for e in events if e.type == "actions"]
+
+    async def test_offer_cards_ends_the_turn_too(self, hotel, scripted):
+        from app.brain.runner import stream_turn
+
+        model = scripted(
+            ai(
+                "Here are our three best rooms.",
+                [
+                    {
+                        "name": "offer_cards",
+                        "args": {"items": [{"title": "Deluxe", "subtitle": "Sea view"}]},
+                    }
+                ],
+            )
+        )
+        events = [
+            e
+            async for e in stream_turn(
+                text="what rooms do you have?", tenant_id=hotel.tenant_id, session_id="cards-end"
+            )
+        ]
+
+        assert model.cursor == 1
+        assert [e for e in events if e.type == "cards"]
+
+    async def test_a_silent_presentation_hop_still_returns_to_reason(self, hotel, scripted):
+        """The guard. Ending on a hop the model didn't introduce in words
+        would leave a turn that is buttons and no text at all."""
+        from app.brain.runner import stream_turn
+
+        model = scripted(
+            ai("", [{"name": "offer_actions", "args": {"buttons": [{"label": "Yes please"}]}}]),
+            ai("Great — which would you like?"),
+        )
+        events = [
+            e
+            async for e in stream_turn(
+                text="anything else?", tenant_id=hotel.tenant_id, session_id="present-silent"
+            )
+        ]
+
+        assert model.cursor == 2
+        assert "which would you like" in "".join(e.text for e in events if e.is_spoken)
+
+    async def test_a_mixed_batch_still_returns_to_reason(self, hotel, scripted):
+        """`check_availability` alongside `offer_actions` still owes the
+        caller its result, so the hop is not a pure presentation one. This is
+        why the walk counts tool *results*, not artifacts — `book_job` and
+        friends carry no artifact at all and would otherwise be invisible."""
+        from app.brain.runner import stream_turn
+
+        model = scripted(
+            ai(
+                "Let me look.",
+                [
+                    {"name": "check_availability", "args": {"service": "room-reservation"}},
+                    {"name": "offer_actions", "args": {"buttons": [{"label": "Book"}]}},
+                ],
+            ),
+            ai("Here's what I found."),
+        )
+        events = [
+            e
+            async for e in stream_turn(
+                text="any rooms tomorrow?", tenant_id=hotel.tenant_id, session_id="present-mixed"
+            )
+        ]
+
+        assert model.cursor == 2
+        assert "Here's what I found." in "".join(e.text for e in events if e.is_spoken)

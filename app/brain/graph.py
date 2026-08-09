@@ -12,7 +12,7 @@ import logging
 import traceback
 from urllib.parse import urlparse
 
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import tools_condition
 
@@ -59,16 +59,21 @@ def build_graph(checkpointer=None):
     builder.add_edge("resolve_tenant", "emergency_check")
     builder.add_edge("emergency_check", "reason")
     builder.add_conditional_edges("reason", tools_condition, {"tools": "tools", END: END})
-    # `tools → reason` unconditionally from Phase 1 until 9.2. The one
-    # exception is `start_flow`: a scripted flow node says exactly what its
-    # config says and stops, so it must not hand back to the model at all.
+    # `tools → reason` unconditionally from Phase 1 until 9.2. Two exceptions
+    # now, both for the same reason — the model has nothing left to say and
+    # saying it anyway is worse than silence. See `_after_tools`.
     builder.add_conditional_edges("tools", _after_tools, {"reason": "reason", END: END})
 
     return builder.compile(checkpointer=checkpointer)
 
 
+#: Tools whose entire job is to render something the model has *already*
+#: introduced in words. Nothing follows them.
+_PRESENTATION_ARTIFACTS = frozenset({"actions", "cards"})
+
+
 def _after_tools(state) -> str:
-    """END after a flow node; back to `reason` for every other tool result.
+    """END after a flow node or a pure presentation hop; else back to `reason`.
 
     Termination has to be a graph edge rather than a prompt instruction.
     "Show this text and these buttons, then STOP" is something a model obeys
@@ -77,20 +82,71 @@ def _after_tools(state) -> str:
     button is a certainty, and a trailing "Is there anything else I can help
     with?" bolted on by the model would quietly undo that.
 
-    Reads the artifact rather than the text, like every other artifact
-    consumer here (`app/brain/runner.py::_handoff_artifact` and friends), so
-    it stays independent of `start_flow`'s wording.
+    **`offer_actions`/`offer_cards` need the same treatment, and this is the
+    real cure for the cross-tool-hop restatement.** Measured live against
+    production, every availability turn came back shaped like this:
+
+        acknowledgement  "Let me check what we've got open."
+        check_availability
+        token            "...we don't have any spa availability this evening.
+                          The earliest openings are Sunday, August 9th."
+        offer_actions                       <- renders those slots as buttons
+        token            "I'm afraid we don't have any spa openings for this
+                          evening. The earliest is Sunday the 9th at 10am."
+
+    The second paragraph is the defect users see. It exists because the
+    unconditional `tools → reason` edge hands control back after a tool whose
+    output is *the words that were just spoken, as buttons* — so the model,
+    given a turn, restates. `RepeatSuppressor` cannot fix this: the wording
+    differs every time, and text-level similarity can't distinguish "said
+    this already" from "adding detail" without guessing (guessing wrong
+    deletes the answer). Removing the turn removes the defect.
+
+    Two guards, because ending a turn early is not free:
+
+    * the hop must be *only* presentation tools — a batch that also called
+      `check_availability` still owes the caller its result;
+    * the model must have already spoken in the same message, or ending here
+      would leave a turn that is buttons and no words.
+
+    Reads artifacts rather than tool names, like every other artifact consumer
+    here (`app/brain/runner.py::_handoff_artifact` and friends), so it stays
+    independent of any tool's wording.
     """
+    #: One entry per tool result in this hop — its artifact kind, or None for
+    #: a tool that returns a plain string. Counting *results* rather than
+    #: artifacts is what stops a mixed batch (`book_job` + `offer_actions`)
+    #: from looking like a pure presentation hop: `book_job` has no artifact,
+    #: so an artifact-only walk would never see it.
+    kinds: list[str | None] = []
     for message in reversed(state.get("messages") or []):
-        artifact = getattr(message, "artifact", None)
-        if isinstance(artifact, dict) and artifact.get("kind") == "flow":
-            return END
         # Only the tool results from this hop matter; stop at the AI message
         # that requested them so an earlier turn's flow can't strand the
         # graph forever.
         if isinstance(message, AIMessage):
+            spoke = bool(_as_text(message.content).strip())
+            if kinds and spoke and all(kind in _PRESENTATION_ARTIFACTS for kind in kinds):
+                return END
             break
+        if isinstance(message, ToolMessage):
+            artifact = getattr(message, "artifact", None)
+            kind = artifact.get("kind") if isinstance(artifact, dict) else None
+            if kind == "flow":
+                return END
+            kinds.append(kind)
     return "reason"
+
+
+def _as_text(content) -> str:
+    """AI message content is a string on most providers and a list of parts on
+    some (Gemini, Anthropic) — only the text parts count as "the model spoke"."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(
+            part.get("text", "") if isinstance(part, dict) else str(part) for part in content
+        )
+    return str(content or "")
 
 
 def get_graph():

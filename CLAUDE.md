@@ -913,12 +913,20 @@ deployment item.
 **Phase 9.1 and 9.2 are both complete and live-verified.** Open items are
 quality/decision, not missing function:
 - ✅ **The cross-tool-hop restatement is fixed** (Phase 9.3 Step 0 item 1) —
-  `RepeatSuppressor` was rewritten to compare **per sentence** against every
-  sentence spoken this turn. See the gotcha below for the two structural
-  bugs and the three guards that let the threshold drop to 0.7 safely.
-  Offline-proven (21 tests, five of which were verified to fail against the
-  old implementation); **not yet confirmed on a live turn** — the remaining
-  reworded-mid-stream case is documented, not solved.
+  in **two** parts, and the second one is the cure. `RepeatSuppressor` was
+  rewritten to compare **per sentence** against every sentence spoken this
+  turn (see the gotcha below). That was necessary but **measurably not
+  sufficient**: six real production turns afterwards still restated on
+  3/6, and capturing the event order showed why — the model spoke the
+  answer, called `offer_actions` to render it as buttons, and the
+  unconditional `tools → reason` edge handed it another turn, in which it
+  restated. So `_after_tools` (`app/brain/graph.py`) now routes a **pure
+  presentation hop** (`offer_actions`/`offer_cards` and nothing else, and
+  only when the model already spoke in that message) to `END`, exactly as
+  `start_flow` has since 9.2. Text-level suppression structurally cannot
+  reach that shape — the rewording differs every time, and guessing wrong
+  deletes the answer. **Do not "simplify" this back to an unconditional
+  edge.**
 - ⏸️ `prompt_augmentation` still ships both behaviours pending a decision —
   say "lock prompt augmentation to auto_append/placeholder_only".
 - A `ListField` fix (every comma-separated field in the panel could only
@@ -1071,6 +1079,18 @@ quality/decision, not missing function:
   fast path releases text the moment it can't be a prefix of anything — holding every
   sentence to its boundary would spend the §13 latency budget on every turn to fix a
   fraction of one.
+- **The restatement users actually see is a *graph* problem, not a text one — don't try to
+  solve it in `sanitize.py`.** Rewriting `RepeatSuppressor` (above) was necessary and
+  measurably insufficient: 3 of 6 real production turns still restated afterwards.
+  Capturing the event order is what settled it — `acknowledgement` → `check_availability`
+  → the answer → `offer_actions` → **the answer again, reworded**. The second paragraph
+  exists because `tools → reason` gave the model a turn after a tool whose only output is
+  *the words it just spoke, as buttons*. No similarity threshold can separate "already
+  said this" from "adding detail" there without guessing, and guessing wrong deletes the
+  answer. `_after_tools` ends the turn instead, guarded twice: the hop must be **only**
+  presentation tools (it counts tool *results*, not artifacts — `book_job` carries no
+  artifact and an artifact-only walk would miss it entirely), and the model must already
+  have spoken in that message, or a turn could end as buttons with no words.
 - **Tool events must never reach `delta.content`** on the voice channel, or the caller hears
   raw tool output read aloud. Only `token` / `acknowledgement` become audio.
 - **Voice thread id is the Vapi call id**, and history is reseeded from Vapi's transcript
