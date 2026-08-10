@@ -20,8 +20,10 @@ def test_an_override_replaces_the_shared_template_entirely(hotel):
         update={"system_prompt_override": "You are ${business_name}'s custom receptionist."}
     )
     prompt = render_system_prompt(custom, channel="voice")
-    assert prompt == f"You are {hotel.name}'s custom receptionist."
+    assert prompt.startswith(f"You are {hotel.name}'s custom receptionist.")
     assert "## Safety" not in prompt
+    # The one thing an override never suppresses — see `_with_live_time`.
+    assert "## Current date and time" in prompt
 
 
 def test_an_override_still_resolves_placeholders(hotel):
@@ -155,7 +157,22 @@ class TestPromptAugmentation:
             prompt_augmentation="placeholder_only",
         )
         prompt = render_system_prompt(tenant, channel="chat")
-        assert prompt == "You are a front desk."
+        assert prompt.startswith("You are a front desk.")
+        assert "## Actions you can offer" not in prompt
+        assert "## Flows you can start" not in prompt
+        assert "## How this chat looks" not in prompt
+
+    def test_placeholder_only_still_gets_the_date(self, hotel):
+        """`prompt_augmentation` is about feature discovery. A prompt that
+        states no date at all can't resolve "tomorrow", which is a
+        correctness bug, so the date is outside the flag's scope."""
+        tenant = _configured(
+            hotel,
+            system_prompt_override="You are a front desk.",
+            prompt_augmentation="placeholder_only",
+        )
+        prompt = render_system_prompt(tenant, channel="chat")
+        assert "## Current date and time" in prompt
 
     def test_the_shared_template_is_unaffected_since_it_has_the_placeholders(self, hotel):
         prompt = render_system_prompt(_configured(hotel), channel="chat")
@@ -186,4 +203,60 @@ class TestPromptAugmentation:
                 "prompt_augmentation": "placeholder_only",
             }
         )
-        assert render_system_prompt(tenant, channel="chat") == "Just this."
+        prompt = render_system_prompt(tenant, channel="chat")
+        # Verbatim apart from the date, which no setting suppresses.
+        assert prompt.startswith("Just this.")
+        assert prompt.replace("Just this.", "", 1).lstrip().startswith("## Current date and time")
+
+
+class TestLiveDate:
+    """The bug this class exists for, found live on `hotel-mzv`: asked for
+    "Saturday" the bot answered "we're fully booked" and offered slots on the
+    previous Monday, while Cal.com had 26 free slots that Saturday. Its stored
+    override opened with `Local time right now: Tuesday 04 August 2026` —
+    six days stale — because the admin panel pre-fills the *rendered* prompt
+    and saving it froze `${local_time}` into a literal.
+    """
+
+    _FROZEN = (
+        "You are the receptionist.\n"
+        "Local time right now: Tuesday 04 August 2026, 11:41 (America/New_York)\n"
+        "Be brief."
+    )
+
+    def test_a_frozen_date_is_replaced_not_duplicated(self, hotel):
+        tenant = hotel.model_copy(update={"system_prompt_override": self._FROZEN})
+        prompt = render_system_prompt(tenant, channel="voice")
+
+        assert "Tuesday 04 August 2026" not in prompt
+        # Exactly one date line: two would leave the model choosing between
+        # contradicting dates, which is no better than one wrong one.
+        assert prompt.count("Local time right now:") == 1
+        assert "You are the receptionist." in prompt and "Be brief." in prompt
+
+    def test_the_replacement_is_todays_date(self, hotel):
+        from datetime import datetime
+
+        moment = datetime(2026, 8, 10, 9, 21, tzinfo=hotel.tz)
+        tenant = hotel.model_copy(update={"system_prompt_override": self._FROZEN})
+        prompt = render_system_prompt(tenant, channel="voice", now=moment)
+
+        assert "Local time right now: Monday 10 August 2026, 09:21" in prompt
+
+    def test_a_prompt_with_no_date_at_all_gets_one(self, hotel):
+        """`playmouth2`'s shape — pasted from another platform, never mentions
+        the date. A model with no date resolves "tomorrow" no better than one
+        with a stale date."""
+        tenant = hotel.model_copy(update={"system_prompt_override": "You are a front desk."})
+        prompt = render_system_prompt(tenant, channel="voice")
+
+        assert "## Current date and time" in prompt
+        assert prompt.count("Local time right now:") == 1
+
+    def test_the_shared_template_still_renders_exactly_one_date_line(self, hotel):
+        """The regex matches our own template's line too, so the substitution
+        must be idempotent rather than doubling it up."""
+        prompt = render_system_prompt(hotel, channel="chat")
+
+        assert prompt.count("Local time right now:") == 1
+        assert "## Current date and time" not in prompt

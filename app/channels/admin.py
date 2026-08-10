@@ -34,7 +34,7 @@ from typing import Any, Literal
 from fastapi import APIRouter, Body, Depends, File, Header, HTTPException, Query, UploadFile, status
 from pydantic import BaseModel, ValidationError
 
-from app.brain.prompts.system import render_system_prompt
+from app.brain.prompts.system import raw_template_text, render_system_prompt
 from app.channels.admin_auth import (
     AdminPrincipal,
     require_admin,
@@ -201,6 +201,11 @@ async def _tenant_detail(live: TenantConfig) -> dict:
     }
     body["_health"] = _config_health(effective)
     body["_rendered_system_prompt"] = render_system_prompt(effective, channel="chat")
+    # What the AI Prompt tab pre-fills for a tenant with no override yet:
+    # the template with its ${placeholders} INTACT. Pre-filling the rendered
+    # text instead is what froze `${local_time}` into a literal date the
+    # moment anyone pressed Save — see prompts/system.py::_with_live_time.
+    body["_raw_system_prompt"] = raw_template_text()
     # The LIVE row's version token — unrelated to _draft_version now that PUT
     # targets the draft; kept for anything that still wants to know "has the
     # live row itself changed under me" (e.g. a concurrent deploy).

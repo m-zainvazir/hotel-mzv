@@ -177,6 +177,10 @@ export interface TenantDetail {
   _version: string | null;
   _health?: ConfigHealth;
   _rendered_system_prompt?: string;
+  /** The shared template with its ${placeholders} intact — what the AI Prompt
+   *  editor pre-fills. Never pre-fill `_rendered_system_prompt`: saving that
+   *  freezes `${local_time}` into a literal date. */
+  _raw_system_prompt?: string;
   live_version: TenantVersionSummary | null;
   /** Permanent public link to this bot — always live config, never expires.
    *  Relative (`/bot/<key>`) when PUBLIC_BASE_URL isn't set; null when the

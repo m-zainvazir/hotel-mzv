@@ -40,7 +40,16 @@ export function SystemPromptView({ tenantId }: { tenantId: string }) {
     getTenantConfig(tenantId)
       .then((d) => {
         setDetail(d);
-        setText((d.config.system_prompt_override as string | null) || d._rendered_system_prompt || "");
+        // The RAW template, never `_rendered_system_prompt` — pre-filling the
+        // rendered text froze ${local_time} into a literal date on the first
+        // save, which is how a bot ended up six days behind and answering
+        // "Saturday" with the previous Monday.
+        setText(
+          (d.config.system_prompt_override as string | null) ||
+            d._raw_system_prompt ||
+            d._rendered_system_prompt ||
+            "",
+        );
       })
       .catch((err) => setError(err instanceof ApiError ? err.message : "failed to load prompt"));
   }
@@ -60,7 +69,10 @@ export function SystemPromptView({ tenantId }: { tenantId: string }) {
       );
       setDetail(saved);
       setText(
-        (saved.config.system_prompt_override as string | null) || saved._rendered_system_prompt || "",
+        (saved.config.system_prompt_override as string | null) ||
+          saved._raw_system_prompt ||
+          saved._rendered_system_prompt ||
+          "",
       );
       setSavedNotice(true);
     } catch (err) {
@@ -87,7 +99,7 @@ export function SystemPromptView({ tenantId }: { tenantId: string }) {
         detail._draft_version,
       );
       setDetail(saved);
-      setText(saved._rendered_system_prompt || "");
+      setText(saved._raw_system_prompt || saved._rendered_system_prompt || "");
       setSavedNotice(true);
     } catch (err) {
       setError(err instanceof Error ? err.message : "reset failed");

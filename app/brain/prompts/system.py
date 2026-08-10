@@ -14,6 +14,7 @@ those pieces live; removing them just makes that section static.
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
@@ -69,6 +70,11 @@ between a good bot and a wall of text.
 #: the model isn't invited to call a tool that will refuse.
 _NO_CARDS_RULE = "\n- Image cards are turned off for this bot. Describe things in words."
 
+#: The line `content/system-prompt.md` renders from `${local_time}`. Matched
+#: (not just substituted) because an *override* can contain this text with the
+#: date already baked in — see `_with_live_time`.
+_TIME_LINE = re.compile(r"^[ \t]*Local time right now:.*$", re.MULTILINE)
+
 
 @lru_cache(maxsize=4)
 def _template(path_str: str, _mtime: float) -> Template:
@@ -83,6 +89,19 @@ def _template(path_str: str, _mtime: float) -> Template:
 def _load_template() -> Template:
     path = get_settings().content_dir / "system-prompt.md"
     return _template(str(path), path.stat().st_mtime)
+
+
+def raw_template_text() -> str:
+    """`content/system-prompt.md` verbatim — placeholders unresolved.
+
+    What the admin panel's AI Prompt tab must pre-fill for a tenant with no
+    override. It used to pre-fill `_rendered_system_prompt` instead, which is
+    the same text with every `${placeholder}` already substituted, so the
+    first save froze them all into literals — including `${local_time}`,
+    which is how `hotel-mzv` ended up telling the model it was 4 August for
+    the next six days. See `_with_live_time`.
+    """
+    return _load_template().template
 
 
 def render_system_prompt(
@@ -177,7 +196,54 @@ def render_system_prompt(
     # `ui_rule` is first: it's the section a pasted prompt most needs and
     # least likely names, and it reads as a preamble to the catalog that
     # follows it.
-    return _augment(tenant, rendered, (ui_rule, links, flows))
+    augmented = _augment(tenant, rendered, (ui_rule, links, flows))
+    # Unconditional, and deliberately outside `_augment`: a prompt that
+    # states the wrong date is a correctness bug, not a missed feature, so
+    # `prompt_augmentation="placeholder_only"` must not switch it off.
+    return _with_live_time(augmented, local_now, tenant.timezone)
+
+
+def _with_live_time(rendered: str, local_now: datetime, timezone: str) -> str:
+    """Guarantee the prompt states the *current* date, whatever it said.
+
+    Found live, and it made the bot look stupid in the most ordinary way
+    possible: asked for "Saturday", `hotel-mzv` answered "we're fully booked"
+    and offered slots on the previous Monday, with Cal.com showing 26 free
+    slots that Saturday all along. Its stored `system_prompt_override` began
+
+        Local time right now: Tuesday 04 August 2026, 11:41 (America/New_York)
+
+    six days stale, because the admin panel's AI Prompt tab pre-fills the
+    *rendered* prompt (`_rendered_system_prompt`) and saving that froze
+    `${local_time}` into a literal. The model then resolved "Saturday" to the
+    8th — already past — and `check_availability` clamped the query up to now,
+    which is exactly the behaviour its docstring promises.
+
+    Two shapes have to be handled, because two different things go wrong:
+
+    * a frozen copy of our own line — **replaced**, not appended to, since
+      leaving both would give the model two contradicting dates;
+    * a prompt from another platform that never mentions the date at all
+      (`playmouth2` is one) — a model with no date can't resolve "tomorrow"
+      any better than one with a wrong date, so a section is appended.
+
+    Fixing the editor to pre-fill the raw template stops *new* prompts
+    freezing, but can't help the ones already saved or the next one pasted
+    in from somewhere else. This can, on the very next turn, with no edit.
+    """
+    line = f"Local time right now: {local_now:%A %d %B %Y, %H:%M} ({timezone})"
+    if _TIME_LINE.search(rendered):
+        # A lambda, not a replacement string: the date carries no backslashes
+        # today, but `\g` or `\1` appearing in one would be interpreted.
+        return _TIME_LINE.sub(lambda _match: line, rendered)
+    return (
+        rendered.rstrip()
+        + "\n\n## Current date and time\n"
+        + line
+        + "\nThis line is regenerated every turn. If anything above states a "
+        "different date, it is stale — use this one when working out what "
+        '"today", "tomorrow" or a named weekday means.\n'
+    )
 
 
 def _augment(tenant: TenantConfig, rendered: str, sections: tuple[str, ...]) -> str:

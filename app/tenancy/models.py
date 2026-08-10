@@ -502,9 +502,12 @@ class TenantConfig(BaseModel):
     #: case for a prompt pasted in from another platform, which is exactly
     #: when a bot most needs its button catalog described to the model.
     #: `"auto_append"` adds any missing section to the end of the rendered
-    #: prompt; `"placeholder_only"` leaves the override strictly alone and
-    #: relies on the admin panel's warning banner to tell the operator.
-    #: See app/brain/prompts/system.py.
+    #: prompt; `"placeholder_only"` appends no catalog section and relies on
+    #: the admin panel's warning banner to tell the operator.
+    #: Scoped to the *catalog* sections only — the current date/time is
+    #: always corrected or appended regardless of this setting, because a
+    #: prompt stating the wrong day is a correctness bug rather than a
+    #: missed feature. See app/brain/prompts/system.py::_with_live_time.
     prompt_augmentation: Literal["auto_append", "placeholder_only"] = "auto_append"
 
     @field_validator("tenant_id")

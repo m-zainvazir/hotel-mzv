@@ -933,9 +933,11 @@ quality/decision, not missing function:
   ever hold one item — the input re-derived its text from the parsed array
   each keystroke and ate the comma) is shipped but not yet clicked in a
   browser.
-- Scratch tenants from 9.1/9.2 testing are still in the tenant list
-  (`new-cringe-1`, `playmouth1`, `test-clinic`, `flow-test`) — archive/purge
-  through the Part B lifecycle path when done with them.
+- Scratch tenants from 9.1/9.2 testing still live in production alongside the
+  two real ones (`hotel-mzv`, `northside-plumbing`): `playmouth1`,
+  `playmouth2`, `test-clinic`. Archive/purge through the Part B lifecycle
+  path when done with them. (`new-cringe-1`, `flow-test` and `zz-flow-check`
+  are already gone.)
 
 ## Gotchas learned the hard way
 - **`/widget.js` must send `Cache-Control: no-cache`, never `immutable`.**
