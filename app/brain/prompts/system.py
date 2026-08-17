@@ -84,6 +84,10 @@ _NO_CARDS_RULE = "\n- Image cards are turned off for this bot. Describe things i
 #: (not just substituted) because an *override* can contain this text with the
 #: date already baked in — see `_with_live_time`.
 _TIME_LINE = re.compile(r"^[ \t]*Local time right now:.*$", re.MULTILINE)
+#: Same idea for the hours line a saved override may have frozen in — see
+#: `_with_live_hours`. Matches our own template's wording, which is what the
+#: AI Prompt tab pre-filled and therefore what got frozen.
+_HOURS_LINE = re.compile(r"^[ \t]*Business hours:.*$", re.MULTILINE)
 
 
 @lru_cache(maxsize=4)
@@ -213,10 +217,13 @@ def render_system_prompt(
     # least likely names, and it reads as a preamble to the catalog that
     # follows it.
     augmented = _augment(tenant, rendered, (ui_rule, links, flows))
-    # Unconditional, and deliberately outside `_augment`: a prompt that
-    # states the wrong date is a correctness bug, not a missed feature, so
-    # `prompt_augmentation="placeholder_only"` must not switch it off.
-    return _with_live_time(augmented, local_now, tenant.timezone)
+    # Both unconditional, and deliberately outside `_augment`: a prompt that
+    # states the wrong date — or hours the calendar no longer keeps — is a
+    # correctness bug, not a missed feature, so
+    # `prompt_augmentation="placeholder_only"` must not switch either off.
+    # `_with_live_hours` also repairs an override whose `${business_hours}`
+    # was frozen into a literal before it ever reached this function.
+    return _with_live_hours(_with_live_time(augmented, local_now, tenant.timezone), business_hours)
 
 
 def _with_live_time(rendered: str, local_now: datetime, timezone: str) -> str:
@@ -260,6 +267,39 @@ def _with_live_time(rendered: str, local_now: datetime, timezone: str) -> str:
         "different date, it is stale — use this one when working out what "
         '"today", "tomorrow" or a named weekday means.\n'
     )
+
+
+def _with_live_hours(rendered: str, business_hours: str | None) -> str:
+    """Guarantee the prompt states the hours the calendar *currently* has.
+
+    The exact sibling of `_with_live_time`, and it exists for the same
+    reason — found the same way, on the same tenant. `hotel-mzv`'s stored
+    `system_prompt_override` contains
+
+        Business hours: Mon 07:00-22:00, Tue 07:00-22:00, ... Sun 07:00-22:00
+
+    frozen in when the AI Prompt tab pre-filled the *rendered* prompt and
+    somebody saved it. There is no `${business_hours}` left in that text, so
+    the whole Phase 9.4 chain — Cal.com -> provider -> cache -> prompt —
+    resolved perfectly and then delivered its answer to a placeholder that no
+    longer existed. Live symptom: opening times were edited in Cal.com, the
+    admin panel showed the new ones correctly, and the bot kept reciting the
+    old ones even when asked for a day-by-day breakdown.
+
+    Only fires when there IS a live value: with nothing to say, an operator's
+    hand-written hours line is better than deleting it. Deliberately outside
+    `prompt_augmentation`, like the date — reciting hours the business no
+    longer keeps is a correctness bug, not a missed feature.
+
+    Nothing is appended when the line is absent, unlike the date. A prompt
+    that never mentions hours is not wrong, just quiet, and `${business_hours}`
+    already covers the shared template.
+    """
+    if not business_hours:
+        return rendered
+    # A lambda, not a replacement string — hours are user/provider data and a
+    # stray `\g` in one would otherwise be interpreted as a group reference.
+    return _HOURS_LINE.sub(lambda _match: f"Business hours: {business_hours}", rendered)
 
 
 def _augment(tenant: TenantConfig, rendered: str, sections: tuple[str, ...]) -> str:

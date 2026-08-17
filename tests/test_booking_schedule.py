@@ -386,3 +386,69 @@ def test_the_schedule_type_is_json_safe():
     dumped = schedule.model_dump(mode="json")
     assert dumped["windows"][0]["days"] == ["Monday"]
     assert dumped["source"] == "calcom"
+
+
+class TestFrozenHoursLine:
+    """The bug that made the whole Phase 9.4 chain look broken in production.
+
+    `hotel-mzv`'s stored `system_prompt_override` carried a literal
+    `Business hours: Mon 07:00-22:00, ...` line, frozen in when the AI Prompt
+    tab pre-filled the *rendered* prompt and someone saved it. With no
+    `${business_hours}` left in the text, Cal.com -> provider -> cache ->
+    prompt all worked perfectly and delivered the answer to a placeholder that
+    no longer existed. Symptom: hours edited in Cal.com, the admin panel showed
+    the new ones, and the bot recited the old ones — even asked day by day.
+
+    Exactly the `${local_time}` trap `_with_live_time` already guards; the
+    hours half was never covered.
+    """
+
+    _FROZEN = (
+        "You are the receptionist for Hotel MZV.\n"
+        "Business hours: Mon 07:00-22:00, Tue 07:00-22:00, Sun 07:00-22:00\n"
+        "Be brief."
+    )
+
+    def test_a_frozen_hours_line_is_replaced_by_the_live_value(self, hotel):
+        tenant = hotel.model_copy(update={"system_prompt_override": self._FROZEN})
+        prompt = render_system_prompt(
+            tenant, channel="chat", business_hours="Sun 07:15-22:00, Mon 07:45-22:00"
+        )
+
+        assert "Business hours: Sun 07:15-22:00, Mon 07:45-22:00" in prompt
+        # Exactly one hours line: two would leave the model choosing between
+        # contradicting opening times, which is no better than one wrong one.
+        assert prompt.count("Business hours:") == 1
+        assert "Mon 07:00-22:00" not in prompt
+        assert "You are the receptionist" in prompt and "Be brief." in prompt
+
+    def test_no_live_value_leaves_the_operators_line_alone(self, hotel):
+        """With nothing to say, a hand-written hours line beats deleting it."""
+        tenant = hotel.model_copy(update={"system_prompt_override": self._FROZEN})
+        prompt = render_system_prompt(tenant, channel="chat")
+
+        assert "Business hours: Mon 07:00-22:00" in prompt
+
+    def test_a_prompt_with_no_hours_line_gains_nothing(self, hotel):
+        """Unlike the date, silence about hours isn't a correctness bug — and
+        the shared template already resolves ${business_hours} itself."""
+        tenant = hotel.model_copy(update={"system_prompt_override": "You are a front desk."})
+        prompt = render_system_prompt(tenant, channel="chat", business_hours="Mon 09:00-17:00")
+
+        assert "Business hours:" not in prompt
+
+    def test_the_shared_template_still_renders_exactly_one_hours_line(self, northside):
+        """The regex matches our own template's line too, so the substitution
+        has to be idempotent rather than doubling it up."""
+        prompt = render_system_prompt(northside, channel="chat", business_hours="Mon 09:00-17:00")
+
+        assert prompt.count("Business hours:") == 1
+        assert "Business hours: Mon 09:00-17:00" in prompt
+
+    def test_a_backslash_in_the_hours_is_not_a_group_reference(self, hotel):
+        r"""Hours are provider data; a stray `\g` would otherwise blow up
+        `re.sub` — the same reason `_with_live_time` uses a lambda."""
+        tenant = hotel.model_copy(update={"system_prompt_override": self._FROZEN})
+        prompt = render_system_prompt(tenant, channel="chat", business_hours=r"Mon 09:00\g<1>")
+
+        assert r"Business hours: Mon 09:00\g<1>" in prompt
