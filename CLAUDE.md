@@ -1218,6 +1218,37 @@ working-looking controls for the one that had no effect. Now:
   this layer is deliberately built to degrade quietly so a calendar outage can't kill a
   turn, and the price is that a mapping bug degrades just as quietly. Only a live check
   finds this class of bug.
+- **A frozen `Business hours:` line in a saved override silently defeats the whole
+  Cal.com hours chain.** `_with_live_hours` (`app/brain/prompts/system.py`) is the exact
+  sibling of `_with_live_time` and exists for the same reason, found the same way, on the
+  same tenant: `hotel-mzv`'s stored `system_prompt_override` contained
+  `Business hours: Mon 07:00-22:00, ...` as literal text with no `${business_hours}` left
+  in it. Cal.com → provider → cache → prompt all resolved perfectly and delivered the
+  answer to a placeholder that no longer existed. Live symptom: hours edited in Cal.com,
+  the admin panel showing the new ones, and the bot reciting the old ones even when asked
+  day by day. **Any placeholder the AI Prompt tab pre-fills can freeze this way** — fixing
+  the editor stops new prompts freezing but can never help the ones already saved, so the
+  repair belongs at render time. It only rewrites when a live value exists (a hand-written
+  hours line beats deleting it) and appends nothing when absent (silence about hours isn't
+  wrong, unlike silence about the date).
+- **A 401 on the MCP *handshake* must drop the cached access token, not just a 401 on a
+  tool call.** The handshake carries the Authorization header, so a stale token fails
+  there first. `_call_tool` had always invalidated; `_get_session` did not, so one bad
+  token poisoned every request for the rest of its ~1h cache life — and re-authorizing the
+  tenant didn't help, because nothing dropped the cached token. Observed in production:
+  `check_availability` returned nothing at all while a freshly authorized grant
+  demonstrably worked. Detecting it needs `_connect_failure_is_auth` to *walk into* the
+  exception: the mcp SDK opens its transport in an anyio task group, so the
+  `httpx.HTTPStatusError: 401` arrives inside an `ExceptionGroup` whose own `str()`
+  mentions neither the status nor the URL.
+- **A Cal.com grant shared by two processes is a rotation race by construction.** Cal.com
+  rotates the refresh token on every refresh and kills the previous one, so a dev box and
+  Railway serving the same tenant will each spend the other's token. `access_token_for`
+  now treats a failed refresh as "maybe I lost the race": drop the cached secret, re-read
+  Vault (where the winner already persisted the new token) and retry once. If the stored
+  value is unchanged the grant really is dead and it raises without a second request.
+  Note this is *recovery*, not prevention — the underlying design (one grant, many
+  processes) still races; it just heals now.
 - **A stored Cal.com grant proves nothing until a real tool call goes through it.**
   `scripts/authorize_calcom.py::_verify_grant` deliberately exercises the *headless*
   refresh path (not the code exchange's own access token — the exchange looked perfect in

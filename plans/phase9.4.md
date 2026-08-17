@@ -268,6 +268,30 @@ Then, against the real project:
 
 ---
 
+## What the operator's own live test run found (2026-08-17)
+
+Three bugs, none of which the offline suite could have caught, all fixed and re-verified in
+production. Worth noting the pattern: every one of them was *silent* — the pipeline resolved
+correctly and the answer went somewhere that no longer read it.
+
+1. **A frozen `Business hours:` line beat the entire feature.** `hotel-mzv`'s saved
+   `system_prompt_override` held the hours as literal text with no `${business_hours}` in it,
+   frozen when the AI Prompt tab pre-filled the *rendered* prompt and someone saved it. Cal.com →
+   provider → cache → prompt all worked and delivered to a placeholder that no longer existed.
+   Fixed by `_with_live_hours`, the sibling of the existing `_with_live_time`. Re-verified live:
+   after editing Cal.com to Mon 07:45 / Tue 07:30, production answers *"On Mondays we open at
+   07:45, and on Tuesdays at 07:30"*.
+2. **A 401 on the MCP handshake left a dead token cached for an hour.** `check_availability`
+   returned nothing at all in production while a freshly authorized grant demonstrably worked,
+   because `_get_session` — unlike `_call_tool` — never invalidated on auth failure. Re-authorizing
+   couldn't help; nothing dropped the cached token. Now invalidates and retries once.
+3. **The reason the token went stale: a cross-process rotation race.** Cal.com rotates the refresh
+   token on every refresh; a dev box and Railway sharing one grant each spend the other's.
+   `access_token_for` now re-reads Vault and retries once on a failed refresh.
+
+Both regression tests for (2) and (3), and the one for (1), were verified to fail against the old
+code with the same error production showed.
+
 ## Implementation record
 
 ### Steps 1–5 — done, offline-tested and green (1034 tests, ruff clean)
