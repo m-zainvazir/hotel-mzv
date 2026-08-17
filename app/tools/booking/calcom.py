@@ -32,9 +32,11 @@ from app.db.store import JobStore
 from app.tenancy.models import Service, TenantConfig
 from app.tenancy.secrets import TenantSecretError, resolve_secret
 from app.tools.booking.base import (
+    AvailabilitySchedule,
     BookingError,
     BookingProvider,
     BookingRequest,
+    ScheduleWindow,
     Slot,
     SlotUnavailableError,
 )
@@ -46,6 +48,7 @@ logger = logging.getLogger(__name__)
 # endpoints pins its own header value.
 _SLOTS_API_VERSION = "2024-09-04"
 _BOOKINGS_API_VERSION = "2024-08-13"
+_SCHEDULES_API_VERSION = "2024-06-11"
 
 _SLOT_UNAVAILABLE_MARKERS = ("already booked", "no longer available", "slot", "conflict")
 
@@ -173,6 +176,30 @@ class CalcomBookingProvider(BookingProvider):
                 end.isoformat(),
             )
         return slots[:limit]
+
+    # --- opening hours ---------------------------------------------------
+
+    async def availability_schedule(self, tenant: TenantConfig) -> AvailabilitySchedule | None:
+        """Phase 9.4: the account's own schedule, so the bot can answer "what
+        time do you open?" from the same source that decides what it can
+        actually book.
+
+        Reads the tenant's *default* schedule rather than the event type's,
+        because `GET /v2/event-types/{id}` returns only a `scheduleId` and
+        resolving it would cost a second round trip for a value that is the
+        default on every account this has been used against. A tenant whose
+        event type deliberately runs on a non-default schedule will see the
+        default one quoted here while `check_availability` keeps booking
+        correctly against the real one — worth revisiting if that ever
+        happens, and harmless until it does.
+        """
+        data = await self._request(
+            "GET",
+            "/schedules",
+            tenant_id=tenant.tenant_id,
+            headers={"cal-api-version": _SCHEDULES_API_VERSION},
+        )
+        return _schedule_from_calcom(data)
 
     # --- mutations ---------------------------------------------------------
 
@@ -419,6 +446,42 @@ def _rejects_length_override(response: httpx.Response) -> bool:
 
 def _parse_calcom_datetime(value: str) -> datetime:
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def _schedule_from_calcom(data: Any) -> AvailabilitySchedule | None:
+    """Map `GET /v2/schedules` onto the provider-neutral shape.
+
+    Shape confirmed live (2026-08-17, `cal-api-version: 2024-06-11`):
+    `{"status": "success", "data": [{"id", "ownerId", "name", "timeZone",
+    "availability": [{"days": ["Monday", ...], "startTime": "07:00",
+    "endTime": "22:00"}], "isDefault": true, "overrides": []}]}`.
+
+    `overrides` (one-off date exceptions) are deliberately ignored: they're
+    "closed on the 25th", not opening hours, and `check_availability` already
+    reflects them because Cal.com applies them to the slots it returns.
+    """
+    schedules = data if isinstance(data, list) else (data or {}).get("data") or []
+    if not schedules:
+        return None
+
+    chosen = next((s for s in schedules if s.get("isDefault")), schedules[0])
+    windows = [
+        ScheduleWindow(
+            days=list(rule.get("days") or []),
+            start=str(rule.get("startTime") or ""),
+            end=str(rule.get("endTime") or ""),
+        )
+        for rule in chosen.get("availability") or []
+        if rule.get("days") and rule.get("startTime") and rule.get("endTime")
+    ]
+    if not windows:
+        return None
+    return AvailabilitySchedule(
+        windows=windows,
+        timezone=str(chosen.get("timeZone") or ""),
+        name=str(chosen.get("name") or ""),
+        source="calcom",
+    )
 
 
 def _placeholder_email(phone: str, settings: Settings) -> str:

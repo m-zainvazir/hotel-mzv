@@ -31,6 +31,16 @@ _CHAT_LENGTH = (
     "two or three short sentences. Light markdown is fine; keep lists to three items or fewer."
 )
 
+#: What fills `${business_hours}` when nothing can honestly state the hours —
+#: a Cal.com-backed tenant whose calendar didn't answer, or one that has
+#: never had a manual grid. The wrong answer here is not "say nothing": the
+#: previous code rendered an empty grid as "Mon closed, Tue closed, …", so a
+#: bot with unconfigured hours cheerfully told callers it never opens.
+_HOURS_UNKNOWN = (
+    "not listed here — check with check_availability and quote real times "
+    "rather than stating opening hours"
+)
+
 #: The shared "how this chat looks" briefing every chat bot gets, whatever
 #: its own prompt says — including a prompt pasted in from another platform,
 #: via `_augment` below. This is what makes buttons and carousels a
@@ -111,7 +121,13 @@ def render_system_prompt(
     now: datetime | None = None,
     emergency: bool = False,
     emergency_reason: str | None = None,
+    business_hours: str | None = None,
 ) -> str:
+    """`business_hours` is Phase 9.4's live value, resolved by the caller
+    (`app/tools/booking/schedule.py`) because reading it can mean a network
+    call and this function is sync. None means "the caller didn't look" —
+    which is the right default for every non-graph caller (tests, the admin
+    panel's prompt preview) and falls back to the tenant's own grid."""
     local_now = (now or datetime.now(tenant.tz)).astimezone(tenant.tz)
 
     services = "\n".join(
@@ -181,7 +197,7 @@ def render_system_prompt(
         channel=channel,
         local_time=f"{local_now:%A %d %B %Y, %H:%M}",
         timezone=tenant.timezone,
-        business_hours=tenant.hours_summary(),
+        business_hours=business_hours or _config_hours(tenant) or _HOURS_UNKNOWN,
         services=services or "  (none configured)",
         length_rule=_VOICE_LENGTH if channel == "voice" else _CHAT_LENGTH,
         safety_rules=safety,
@@ -267,6 +283,20 @@ def _augment(tenant: TenantConfig, rendered: str, sections: tuple[str, ...]) -> 
     if not missing:
         return rendered
     return rendered.rstrip() + "\n\n" + "\n\n".join(missing) + "\n"
+
+
+def _config_hours(tenant: TenantConfig) -> str:
+    """The manual grid, but only for a tenant it's actually authoritative for.
+
+    Phase 9.4: once a real calendar is behind the bot, the grid in tenant
+    config is whatever someone typed before the calendar took over — nobody
+    maintains it, and the admin panel now hides it. Quoting it as a fallback
+    would mean confidently reciting hours no one has looked at in months,
+    which is worse than declining to state any.
+    """
+    if tenant.booking.provider != "stub" or not tenant.hours:
+        return ""
+    return tenant.hours_summary()
 
 
 def _render_links(tenant: TenantConfig) -> str:

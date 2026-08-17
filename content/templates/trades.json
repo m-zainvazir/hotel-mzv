@@ -2,7 +2,7 @@
   "tenant_id": "template",
   "name": "New Trades Business",
   "trade": "trades",
-  "timezone": "America/Chicago",
+  "timezone": "Asia/Karachi",
   "status": "onboarding",
   "phone_numbers": [],
   "widget_keys": [],

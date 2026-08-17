@@ -11,6 +11,29 @@ import { navigate, tenantUrl } from "../router";
 
 const TEMPLATES = ["hotel", "clinic", "trades", "salon", "restaurant"];
 
+//: Matches `TenantConfig.timezone`'s own default (app/tenancy/models.py), so
+//: creating a bot and never touching this field lands on the same value the
+//: server would have picked anyway.
+const DEFAULT_TIMEZONE = "Asia/Karachi";
+
+function timezoneChoices(): string[] {
+  try {
+    const supported = (
+      Intl as unknown as { supportedValuesOf?: (k: string) => string[] }
+    ).supportedValuesOf?.("timeZone");
+    if (supported?.length) {
+      // Pinned to the top: it's the default, and scrolling an alphabetical
+      // 400-entry list to confirm it is busywork on every single new bot.
+      return [DEFAULT_TIMEZONE, ...supported.filter((z) => z !== DEFAULT_TIMEZONE)];
+    }
+  } catch {
+    /* fall through */
+  }
+  return [DEFAULT_TIMEZONE, "Asia/Dubai", "Europe/London", "America/New_York", "UTC"];
+}
+
+const timezoneOptions = timezoneChoices();
+
 type FieldErrors = Map<string, string>;
 
 function parseFieldErrors(detail: unknown): FieldErrors {
@@ -36,6 +59,11 @@ export function NewTenantView() {
   const [trade, setTrade] = useState("");
   const [greeting, setGreeting] = useState("");
   const [escalationPhone, setEscalationPhone] = useState("");
+  // Phase 9.4. Kept as a string, not a number: an empty box has to mean
+  // "no calendar", and a numeric input coerces that to 0 — which would read
+  // as event type 0 and create a bot pointed at nothing.
+  const [calcomEventTypeId, setCalcomEventTypeId] = useState("");
+  const [timezone, setTimezone] = useState(DEFAULT_TIMEZONE);
 
   const [error, setError] = useState<string | null>(null);
   const [fieldErrors, setFieldErrors] = useState<FieldErrors>(new Map());
@@ -65,6 +93,8 @@ export function NewTenantView() {
         trade: trade.trim(),
         greeting: greeting.trim(),
         escalation_phone: escalationPhone.trim(),
+        calcom_event_type_id: calcomEventTypeId.trim() ? Number(calcomEventTypeId.trim()) : null,
+        timezone,
       });
       // `created` is a TenantDetail, so the id lives one level down. Reading
       // `created.tenant_id` here navigated to the literal string "undefined"
@@ -201,6 +231,59 @@ export function NewTenantView() {
               <span class="admin-field-error">{fieldErrors.get("emergency.escalation_phone")}</span>
             )}
           </div>
+        </div>
+
+        <div class="admin-section">
+          <h2>Calendar</h2>
+          <p class="admin-muted">
+            Connect a Cal.com calendar and it decides everything about availability — which days,
+            which hours, what's already booked. Leave this blank and the bot uses a simulated
+            calendar with hours you set by hand, which is fine for trying it out.
+          </p>
+          <div class="admin-field-row">
+            <div class="admin-field">
+              <label>Cal.com event type ID (optional)</label>
+              <input
+                type="text"
+                inputMode="numeric"
+                value={calcomEventTypeId}
+                onInput={(e) => setCalcomEventTypeId((e.target as HTMLInputElement).value)}
+                placeholder="6446177"
+              />
+              <span class="admin-muted" style={{ fontSize: "0.8rem" }}>
+                In Cal.com, open the event type and copy the number from its URL.
+              </span>
+              {fieldErrors.get("calcom_event_type_id") && (
+                <span class="admin-field-error">{fieldErrors.get("calcom_event_type_id")}</span>
+              )}
+            </div>
+            <div class="admin-field">
+              <label>Timezone</label>
+              <select
+                value={timezone}
+                onChange={(e) => setTimezone((e.target as HTMLSelectElement).value)}
+              >
+                {timezoneOptions.map((zone) => (
+                  <option value={zone} key={zone}>
+                    {zone}
+                  </option>
+                ))}
+              </select>
+              {fieldErrors.get("timezone") && (
+                <span class="admin-field-error">{fieldErrors.get("timezone")}</span>
+              )}
+            </div>
+          </div>
+          {calcomEventTypeId.trim() !== "" && (
+            <div class="admin-tile">
+              One more step after creating this bot: authorize it against the Cal.com account
+              that owns the calendar, by running{" "}
+              <code>
+                python -m scripts.authorize_calcom --tenant {tenantId.trim() || "<tenant-id>"}
+              </code>
+              . Until then it won't be able to check availability or book anything.
+            </div>
+          )}
         </div>
 
         <button class="admin-btn" type="submit" disabled={creating}>

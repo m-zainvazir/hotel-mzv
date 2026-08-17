@@ -47,6 +47,20 @@ async def reason(state: ReceptionistState, config: RunnableConfig) -> dict:
     if tools:
         model = model.bind_tools(tools)
 
+    # Phase 9.4: opening hours come from whoever actually owns them — the
+    # tenant's calendar, not its config. Cached per tenant, so this is an
+    # in-memory read on all but the first turn after a config change; it
+    # never raises (see that module's docstring).
+    #
+    # Imported here, not at module scope: `app/tools/__init__.py` pulls in the
+    # whole tool registry, which reaches back through app.flows -> app.brain
+    # -> this module. `from app.tools.registry import ...` above survives that
+    # only because it resolves after the cycle has already unwound; a second,
+    # alphabetically-earlier tools import does not.
+    from app.tools.booking.schedule import business_hours_for
+
+    business_hours = await business_hours_for(tenant)
+
     prompt = [
         SystemMessage(
             render_system_prompt(
@@ -55,6 +69,7 @@ async def reason(state: ReceptionistState, config: RunnableConfig) -> dict:
                 now=datetime.now(tenant.tz),
                 emergency=bool(state.get("emergency")),
                 emergency_reason=state.get("emergency_reason"),
+                business_hours=business_hours,
             )
         ),
         *_recent(state.get("messages", [])),

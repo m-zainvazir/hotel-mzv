@@ -2,7 +2,7 @@
   "tenant_id": "northside-plumbing",
   "name": "Northside Plumbing",
   "trade": "plumber",
-  "timezone": "America/Chicago",
+  "timezone": "Asia/Karachi",
   "status": "active",
   "phone_numbers": ["+15559870000"],
   "widget_keys": ["pk_widget_northside_demo"],

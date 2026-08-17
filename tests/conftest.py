@@ -37,6 +37,7 @@ from app.tenancy.loader import clear_tenant_cache, get_repository, get_tenant_co
 from app.tenancy.models import TenantConfig
 from app.tenancy.secrets import clear_secret_cache
 from app.tools.booking.mcp_calcom import reset_session_cache as reset_calcom_mcp_sessions
+from app.tools.booking.schedule import clear_schedule_cache
 from app.tools.booking.stub import StubBookingProvider
 from app.tools.http_client import reset_shared_clients
 from app.tools.providers import reset_provider_overrides, set_booking_provider
@@ -241,6 +242,7 @@ def isolated_runtime():
     clear_mcp_cache()
     clear_calcom_oauth_cache()
     reset_calcom_mcp_sessions()
+    clear_schedule_cache()
     reset_rate_limits()
     seed_acknowledgements(1234)
     yield
@@ -257,6 +259,7 @@ def isolated_runtime():
     clear_mcp_cache()
     clear_calcom_oauth_cache()
     reset_calcom_mcp_sessions()
+    clear_schedule_cache()
 
 
 @pytest.fixture

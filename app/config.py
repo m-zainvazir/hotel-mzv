@@ -112,6 +112,12 @@ class Settings(BaseSettings):
     #: before responding; verified live that 8s was too tight and produced a
     #: false-negative timeout on an otherwise-successful booking).
     calcom_timeout_seconds: float = 15.0
+    #: How long a tenant's opening hours are cached (Phase 9.4,
+    #: `app/tools/booking/schedule.py`). Read on every turn to render one
+    #: prompt line, so this must not be a per-turn network call; a business's
+    #: hours change on the order of years, and any config edit that could
+    #: affect the answer invalidates the entry immediately regardless.
+    booking_schedule_cache_seconds: float = 900.0
     #: Cal.com requires an attendee email; phone callers rarely give one. When
     #: none is offered we synthesize `caller-<digits>@<this domain>` —
     #: deterministic (same caller twice = same Cal.com attendee). Must be a

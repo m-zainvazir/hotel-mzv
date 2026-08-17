@@ -42,6 +42,7 @@ from app.db.store import JobStore
 from app.mcp.oauth import invalidate as invalidate_oauth_token
 from app.tenancy.models import Service, TenantConfig
 from app.tools.booking.base import (
+    AvailabilitySchedule,
     BookingError,
     BookingProvider,
     BookingRequest,
@@ -153,6 +154,38 @@ class McpBookingProvider(BookingProvider):
                 end.isoformat(),
             )
         return slots[:limit]
+
+    # --- opening hours ---------------------------------------------------
+
+    async def availability_schedule(self, tenant: TenantConfig) -> AvailabilitySchedule | None:
+        """Phase 9.4, and the one place this provider deliberately reaches
+        past MCP to the plain REST API.
+
+        Cal.com's hosted MCP server exposes booking tools; nothing in its
+        published tool list returns an availability *schedule*. The obvious
+        alternative — inferring opening hours from a `get_availability` sweep
+        — is actively wrong: a fully-booked Tuesday would come back empty and
+        the bot would tell callers it's closed on Tuesdays. Reporting no
+        hours at all is better than reporting false ones, so the fallback
+        chain is: REST `/v2/schedules` when this tenant has a resolvable API
+        key, otherwise None (and the prompt tells the model to quote
+        `check_availability` instead of hours).
+
+        Consequence worth knowing: an `mcp_calcom` tenant with an OAuth grant
+        but no API key books fine and simply can't quote its opening hours.
+        Revisit if Cal.com's MCP server ever ships a schedule tool — see
+        `plans/phase9.4.md` Step 0.
+        """
+        from app.tools.booking.calcom import CalcomBookingProvider
+
+        try:
+            return await CalcomBookingProvider(store=self._store).availability_schedule(tenant)
+        except BookingError:
+            logger.info(
+                "no REST schedule available for mcp_calcom tenant=%s — hours will be omitted",
+                tenant.tenant_id,
+            )
+            return None
 
     # --- mutations ---------------------------------------------------------
 

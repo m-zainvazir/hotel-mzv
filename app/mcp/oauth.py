@@ -371,6 +371,28 @@ async def _load_credentials(tenant_id: str) -> tuple[str, str, str | None]:
     return refresh_token, client_id, client_secret or None
 
 
+async def has_grant(tenant_id: str) -> bool:
+    """Whether this tenant has completed the Cal.com OAuth flow (Phase 9.4).
+
+    Deliberately NOT `access_token_for` with the error caught: that performs a
+    real refresh against Cal.com's token endpoint, and this is called to draw
+    a badge in the admin panel. Rendering a page must not spend a network
+    round trip — or worse, burn a refresh token — per tenant.
+
+    A vault *error* answers False here, unlike `resolve_secret`'s "an error is
+    never absent" rule (CLAUDE.md). That rule exists to stop a failed lookup
+    silently falling back to a shared credential and booking into the wrong
+    account; nothing falls back here, and the only consequence of a wrong
+    False is the panel showing "not connected" while the bot keeps booking
+    perfectly well.
+    """
+    try:
+        await _load_credentials(tenant_id)
+    except CalcomOAuthError:
+        return False
+    return True
+
+
 async def _cached_metadata(resource_url: str, *, client: httpx.AsyncClient | None) -> OAuthMetadata:
     origin = _origin(resource_url)
     now = time.monotonic()

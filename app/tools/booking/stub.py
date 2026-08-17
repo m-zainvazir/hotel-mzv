@@ -12,10 +12,12 @@ from datetime import datetime, timedelta
 from app.db.factory import get_store
 from app.db.models import Job, JobStatus
 from app.db.store import JobStore
-from app.tenancy.models import Service, TenantConfig
+from app.tenancy.models import WEEKDAYS, Service, TenantConfig
 from app.tools.booking.base import (
+    AvailabilitySchedule,
     BookingProvider,
     BookingRequest,
+    ScheduleWindow,
     Slot,
     SlotUnavailableError,
 )
@@ -74,6 +76,32 @@ class StubBookingProvider(BookingProvider):
                         return slots
                 cursor += granularity
         return slots
+
+    # --- opening hours ---------------------------------------------------
+
+    async def availability_schedule(self, tenant: TenantConfig) -> AvailabilitySchedule | None:
+        """The manual grid in tenant config — which, for a stub tenant, IS the
+        authoritative source (Phase 9.4). Every other provider answers from a
+        real calendar; this one is why the grid still exists at all.
+
+        Consecutive days sharing the same open/close collapse into one window,
+        so a Mon-Fri business reads "Mon-Fri 09:00-17:00" here exactly as it
+        would coming back from Cal.com.
+        """
+        windows: list[ScheduleWindow] = []
+        for day in WEEKDAYS:
+            hours = tenant.hours.get(day)
+            if hours is None:
+                continue
+            start, end = f"{hours.open:%H:%M}", f"{hours.close:%H:%M}"
+            if windows and windows[-1].start == start and windows[-1].end == end:
+                windows[-1].days.append(day.capitalize())
+            else:
+                windows.append(ScheduleWindow(days=[day.capitalize()], start=start, end=end))
+
+        if not windows:
+            return None
+        return AvailabilitySchedule(windows=windows, timezone=tenant.timezone, source="config")
 
     # --- mutations ---------------------------------------------------------
 

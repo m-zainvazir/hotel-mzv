@@ -3,8 +3,10 @@ import { useEffect, useState } from "preact/hooks";
 import {
   ApiError,
   archiveTenant,
+  CalcomStatus,
   createTestLink,
   discardDraft,
+  getCalcomStatus,
   getTenantConfig,
   purgeTenant,
   restoreTenant,
@@ -177,17 +179,29 @@ export function ConfigView({
   const [fieldErrors, setFieldErrors] = useState<FieldErrors>(new Map());
   const [saving, setSaving] = useState(false);
   const [savedNotice, setSavedNotice] = useState(false);
+  // Phase 9.4. null while loading; a failed fetch leaves it null and the
+  // Hours section falls back to the editable grid — the safe direction, since
+  // the alternative hides the only controls that work.
+  const [calcom, setCalcom] = useState<CalcomStatus | null>(null);
+
+  function loadCalcom(): void {
+    getCalcomStatus(tenantId)
+      .then(setCalcom)
+      .catch(() => setCalcom(null));
+  }
 
   function load(): void {
     setConfig(null);
     setDetail(null);
     setError(null);
+    setCalcom(null);
     getTenantConfig(tenantId)
       .then((d) => {
         setDetail(d);
         setConfig(d.config);
       })
       .catch((err) => setError(err instanceof ApiError ? err.message : "failed to load config"));
+    loadCalcom();
   }
 
   useEffect(load, [tenantId]);
@@ -319,10 +333,9 @@ export function ConfigView({
         <div class="admin-field-row">
           <TextField label="Name" value={config.name} onChange={(v) => update("name", v)} />
           <TextField label="Trade" value={config.trade} onChange={(v) => update("trade", v)} />
-          <TextField
-            label="Timezone (IANA)"
-            value={config.timezone}
-            onChange={(v) => update("timezone", v)}
+          <TimezoneField
+            value={config.timezone as string}
+            onChange={(v) => update("timezone", v as never)}
             error={fieldErrors.get("timezone")}
           />
         </div>
@@ -363,6 +376,8 @@ export function ConfigView({
         value={(config.hours as Record<string, DayHoursValue | null>) ?? {}}
         onChange={(v) => update("hours", v as never)}
         errors={fieldErrors}
+        calcom={calcom}
+        timezone={config.timezone as string}
       />
 
       <ServicesSection
@@ -382,6 +397,7 @@ export function ConfigView({
         onChange={(v) => update("booking", v as never)}
         isOperator={isOperator}
         errors={fieldErrors}
+        calcom={calcom}
       />
 
       <NotificationsSection
@@ -605,6 +621,89 @@ function HealthBadge({ label, live, value }: { label: string; live: boolean; val
   );
 }
 
+/** Zones offered when the browser can't enumerate them itself. Deliberately
+ *  short — it's a fallback, and the free-text box below the picker covers
+ *  anything missing. */
+const FALLBACK_TIMEZONES = [
+  "Asia/Karachi",
+  "Asia/Dubai",
+  "Asia/Kolkata",
+  "Europe/London",
+  "America/New_York",
+  "America/Chicago",
+  "America/Los_Angeles",
+  "UTC",
+];
+
+function allTimezones(): string[] {
+  // `Intl.supportedValuesOf` gives the browser's full IANA list at zero
+  // bundle cost. Guarded because it's a relatively recent addition and this
+  // panel must not blank out on an older browser.
+  try {
+    const supported = (
+      Intl as unknown as { supportedValuesOf?: (k: string) => string[] }
+    ).supportedValuesOf?.("timeZone");
+    if (supported?.length) return supported;
+  } catch {
+    /* fall through */
+  }
+  return FALLBACK_TIMEZONES;
+}
+
+function localTimeIn(timezone: string): string {
+  try {
+    return new Intl.DateTimeFormat(undefined, {
+      timeZone: timezone,
+      weekday: "short",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    }).format(new Date());
+  } catch {
+    // An unknown zone — the server's own validator will 422 it on save with
+    // a message attached to this field, so don't duplicate that here.
+    return "";
+  }
+}
+
+/** Phase 9.4. A picker rather than a text box: the value has to be an exact
+ *  IANA id, and a typo used to be discoverable only by saving. The current
+ *  time in the selected zone is shown because that's how you actually tell
+ *  you picked the right one. */
+function TimezoneField({
+  value,
+  onChange,
+  error,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  error?: string;
+}) {
+  const zones = allTimezones();
+  // A tenant already on a zone this browser doesn't list must not have it
+  // silently swapped for whatever the <select> falls back to.
+  const options = zones.includes(value) ? zones : [value, ...zones];
+  const now = localTimeIn(value);
+
+  return (
+    <div class="admin-field">
+      <label>Timezone</label>
+      <select value={value} onChange={(e) => onChange((e.target as HTMLSelectElement).value)}>
+        {options.map((zone) => (
+          <option value={zone} key={zone}>
+            {zone}
+          </option>
+        ))}
+      </select>
+      <span class="admin-muted" style={{ fontSize: "0.8rem" }}>
+        {now ? `It's ${now} there right now.` : "Unrecognised timezone."} Every time this bot
+        speaks or books is in this zone.
+      </span>
+      {error && <span class="admin-field-error">{error}</span>}
+    </div>
+  );
+}
+
 function TextField({
   label,
   value,
@@ -764,14 +863,69 @@ function HoursSection({
   value,
   onChange,
   errors,
+  calcom,
+  timezone,
 }: {
   value: Record<string, DayHoursValue | null>;
   onChange: (v: Record<string, DayHoursValue | null>) => void;
   errors: FieldErrors;
+  calcom: CalcomStatus | null;
+  timezone: string;
 }) {
+  // Phase 9.4. When a real calendar owns availability, editing these times
+  // does nothing — Cal.com's own schedule decides. A note saying so was
+  // already here and did not stop the confusion, because a caveat above a
+  // set of working inputs loses. So the inputs go away entirely.
+  if (calcom?.connected) {
+    return (
+      <div class="admin-section">
+        <h2>
+          Hours <span class="admin-badge admin-badge--ok">Managed in Cal.com</span>
+        </h2>
+        <p class="admin-muted">
+          This bot's availability comes from its Cal.com schedule
+          {calcom.schedule?.name ? ` ("${calcom.schedule.name}")` : ""} — the same source it books
+          against. To change when it can take appointments, edit that schedule in Cal.com; it
+          applies here on the next conversation.
+        </p>
+        {calcom.schedule ? (
+          <table class="admin-table">
+            <tbody>
+              {calcom.schedule.windows.map((window, i) => (
+                <tr key={i}>
+                  <td>{window.days.map((d) => d.slice(0, 3)).join(", ")}</td>
+                  <td>
+                    {window.start} – {window.end}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : (
+          <p class="admin-field-error">{calcom.reason}</p>
+        )}
+        {calcom.timezone_matches === false && (
+          <div class="admin-field-error" style={{ marginTop: "0.75rem" }}>
+            <strong>Timezone mismatch.</strong> This bot speaks in <code>{timezone}</code> but its
+            Cal.com schedule is set to <code>{calcom.timezone}</code>. Bookings will land on the
+            calendar at a different clock time — and sometimes a different day. Set both to the
+            same zone: the Timezone field above, and the schedule's own timezone in Cal.com
+            (check the account's profile timezone too — it's a separate setting).
+          </div>
+        )}
+      </div>
+    );
+  }
+
   return (
     <div class="admin-section">
       <h2>Hours</h2>
+      <p class="admin-muted">
+        {calcom && calcom.provider !== "stub"
+          ? calcom.reason
+          : "No calendar is connected, so these times are what the bot offers. Connect Cal.com " +
+            "in the Booking section below to have a real calendar decide instead."}
+      </p>
       {errors.get("hours") && <div class="admin-field-error">{errors.get("hours")}</div>}
       {WEEKDAYS.map((day) => {
         const hours = value[day];
@@ -952,19 +1106,33 @@ function BookingSection({
   onChange,
   isOperator,
   errors,
+  calcom,
 }: {
   value: BookingValue;
   onChange: (v: BookingValue) => void;
   isOperator: boolean;
   errors: FieldErrors;
+  calcom: CalcomStatus | null;
 }) {
+  // Slot granularity and lead time are Cal.com's to decide once it's
+  // connected; horizon and max-slots are not (they're how far ahead we ask
+  // and how many options the bot reads out — Cal.com has no opinion on
+  // either), so those stay whatever the provider is.
+  const calendarOwnsSlots = Boolean(calcom?.connected);
   return (
     <div class="admin-section">
       <h2>Booking</h2>
-      <p class="admin-muted">
-        Once provider is "calcom", Cal.com's own event-type schedule governs availability — hours/
-        lead-time/granularity below become prompt copy only.
-      </p>
+      {calcom && !calcom.connected && calcom.provider !== "stub" && (
+        <div class="admin-field-error" style={{ marginBottom: "0.75rem" }}>
+          <strong>Not connected to Cal.com.</strong> {calcom.reason}
+        </div>
+      )}
+      {calendarOwnsSlots && (
+        <p class="admin-muted">
+          Connected to Cal.com. Availability — which days, which times, how long a gap between
+          appointments — is set in Cal.com, not here.
+        </p>
+      )}
       <div class="admin-field-row">
         <div class="admin-field">
           <label>Provider</label>
@@ -992,23 +1160,27 @@ function BookingSection({
         />
       </div>
       <div class="admin-field-row">
+        {!calendarOwnsSlots && (
+          <NumberField
+            label="Slot granularity (min)"
+            value={value.slot_granularity_minutes}
+            onChange={(v) => onChange({ ...value, slot_granularity_minutes: v })}
+          />
+        )}
+        {!calendarOwnsSlots && (
+          <NumberField
+            label="Lead time (hours)"
+            value={value.lead_time_hours}
+            onChange={(v) => onChange({ ...value, lead_time_hours: v })}
+          />
+        )}
         <NumberField
-          label="Slot granularity (min)"
-          value={value.slot_granularity_minutes}
-          onChange={(v) => onChange({ ...value, slot_granularity_minutes: v })}
-        />
-        <NumberField
-          label="Lead time (hours)"
-          value={value.lead_time_hours}
-          onChange={(v) => onChange({ ...value, lead_time_hours: v })}
-        />
-        <NumberField
-          label="Horizon (days)"
+          label="How far ahead to look (days)"
           value={value.horizon_days}
           onChange={(v) => onChange({ ...value, horizon_days: v })}
         />
         <NumberField
-          label="Max slots returned"
+          label="Options to offer at once"
           value={value.max_slots_returned}
           onChange={(v) => onChange({ ...value, max_slots_returned: v })}
         />

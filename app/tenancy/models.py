@@ -454,7 +454,13 @@ class TenantConfig(BaseModel):
     tenant_id: str
     name: str
     trade: str
-    timezone: str = "UTC"
+    #: Phase 9.4: the operating timezone for this business. Governs which
+    #: slots `check_availability` offers and how every time is spoken. For a
+    #: Cal.com-connected tenant this must match the Cal.com *schedule's*
+    #: timezone — and that account's *profile* timezone too, which is a
+    #: separate setting that only controls how the dashboard displays what
+    #: was booked (see the CLAUDE.md gotcha). The admin panel warns on drift.
+    timezone: str = "Asia/Karachi"
     #: "archived" (Phase 9 Part B) is a soft-delete: `resolve_tenant_id`
     #: refuses to serve one on any channel, but every row survives until an
     #: explicit, separately-confirmed purge. Not the same as "paused" —

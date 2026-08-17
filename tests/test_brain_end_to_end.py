@@ -152,7 +152,7 @@ async def test_tenant_config_reaches_the_system_prompt(scripted, northside):
     assert "Northside Plumbing" in system_prompt
     assert "plumber" in system_prompt
     assert "drain-clearing" in system_prompt
-    assert "America/Chicago" in system_prompt
+    assert northside.timezone in system_prompt
 
 
 async def test_model_is_bound_to_the_native_tool_tier(scripted, hotel):

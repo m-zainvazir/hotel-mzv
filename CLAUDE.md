@@ -939,6 +939,43 @@ quality/decision, not missing function:
   path when done with them. (`new-cringe-1`, `flow-test` and `zz-flow-check`
   are already gone.)
 
+**Phase 9.4 (Cal.com owns availability; Asia/Karachi everywhere) is
+code-complete, offline-tested and live-verified — see `plans/phase9.4.md`.
+Not yet deployed to Railway.** The problem it fixes: a bot's opening hours
+were configured in two places that disagreed, and the panel rendered
+working-looking controls for the one that had no effect. Now:
+
+- **`BookingProvider.availability_schedule`** (non-abstract, defaults to
+  `None`) is the new seam; `app/tools/booking/schedule.py` caches it per
+  tenant and never raises. Both Cal.com providers read `GET /v2/schedules`;
+  the stub reads the config grid, which is genuinely authoritative for it.
+  `McpBookingProvider` delegates to the REST one **on purpose** — Cal.com's
+  hosted MCP server exposes no schedule tool, and inferring hours from a
+  `get_availability` sweep would report a fully-booked Tuesday as "closed
+  Tuesdays". Consequence: an `mcp_calcom` tenant with an OAuth grant but no
+  API key books fine and simply can't quote its hours.
+- **The Config tab is conditional.** `GET /admin/api/tenants/{id}/calcom`
+  computes `connected` (provider + resolvable event type + a credential —
+  an OAuth grant via the new `has_grant()`, or an API key) and the panel
+  either shows Cal.com's real schedule read-only or the editable grid. The
+  status is computed, never stored: a `calcom_connected` config field would
+  be a fourth place for this to drift.
+- **`Asia/Karachi` is the default** (`TenantConfig.timezone`), on all five
+  templates, on all five live bots, and on the Cal.com account — both its
+  schedule (`1678330`) and its profile. The timezone field is a picker with a
+  live "it's 21:14 there" preview instead of a free-text box.
+- **New Bot takes a Cal.com event type ID.** Filled → `mcp_calcom`; blank →
+  the stub with its editable grid. Templates still ship `"stub"` because a
+  template declaring a Cal.com provider with no event type fails
+  `_calcom_tenants_declare_event_types` at load.
+- **Live-verified**: hotel-mzv answers "what time do you open?" with Cal.com's
+  own `7:00 AM to 10:00 PM`, and returns real slots at `+05:00`.
+- **Still open**: `hotel-mzv` is still on REST `"calcom"`, not `mcp_calcom` —
+  that needs the interactive `python -m scripts.authorize_calcom --tenant
+  hotel-mzv`. And `northside-plumbing`'s timezone is staged in a draft it
+  already had (a greeting with a doubled `?`), so deploying it is a decision,
+  not a mechanical step.
+
 ## Gotchas learned the hard way
 - **`/widget.js` must send `Cache-Control: no-cache`, never `immutable`.**
   It shipped as `public, max-age=31536000, immutable` from Phase 5 — the
@@ -1108,17 +1145,43 @@ quality/decision, not missing function:
 - **All Vapi wire-format assumptions live in `app/channels/vapi_schema.py`.** Field names
   were verified against Vapi's own reference implementation (VapiAI/example-custom-llm).
   If their payload changes, that file plus the header constants are the only edit needed.
-- **Once a tenant is on `booking.provider: "calcom"`, Cal.com — not the tenant JSON —
-  owns availability.** `booking.hours`/`lead_time_hours`/`slot_granularity_minutes`
-  become prompt copy only; `check_availability` never re-filters by them
-  (`app/tools/booking/calcom.py`). Edit them and nothing changes for a calcom tenant —
-  edit the Cal.com event type's own schedule instead. Only `horizon_days` (the query
-  window) and `max_slots_returned` (client-side truncation) still do anything. The
-  Cal.com **schedule tz** governs availability and the **account profile tz** governs
-  how the dashboard displays bookings — set both to the *tenant's* timezone, not your
-  own, or the calendar shows a different clock (and possibly day) than the receptionist
-  speaks. Verified live: a Karachi account displayed a New-York 8pm booking as next-day
-  5am.
+- **Once a tenant is on `booking.provider: "calcom"`/`"mcp_calcom"`, Cal.com — not the
+  tenant config — owns availability. Phase 9.4 made that structural rather than a
+  convention someone has to remember.** `booking.hours`/`lead_time_hours`/
+  `slot_granularity_minutes` are not "prompt copy only" any more; they are ignored
+  outright for such a tenant. `_config_hours` (`app/brain/prompts/system.py`) returns
+  the grid **only** for `provider == "stub"`, and the admin panel doesn't render those
+  three fields at all when the Cal.com connection is live (`GET
+  /admin/api/tenants/{id}/calcom`). The previous state — real, working-looking inputs
+  under a caveat sentence — did not stop the confusion, which is why the inputs went
+  away instead of gaining a stronger warning. `horizon_days` (query window) and
+  `max_slots_returned` (how many options to read out) stay editable on every provider:
+  Cal.com has no opinion on either.
+  The hours the bot **quotes** now come from `GET /v2/schedules` via
+  `BookingProvider.availability_schedule` + `app/tools/booking/schedule.py` (cached,
+  fingerprinted on provider/event-type/timezone so a config edit invalidates
+  immediately, and never raises — a calendar outage costs the prompt its hours line,
+  never the turn). With no source at all the prompt says so and tells the model to quote
+  `check_availability`; the old code rendered an empty grid as "Mon closed, Tue
+  closed, …" and the bot cheerfully told callers it never opens.
+  The Cal.com **schedule tz** governs availability and the **account profile tz** governs
+  how the dashboard displays bookings — two settings, both of which must match the
+  *tenant's* timezone, or the calendar shows a different clock (and possibly day) than the
+  receptionist speaks. Verified live twice: once as the bug (a Karachi account displayed a
+  New-York 8pm booking as next-day 5am) and once as the fix (Phase 9.4 moved both to
+  `Asia/Karachi` via `PATCH /v2/schedules/{id}` + `PATCH /v2/me`). `timezone_matches` on
+  the status route surfaces drift in the schedule half; the profile half is only visible
+  in Cal.com itself.
+- **Cal.com's Cloudflare 403s a bare `Python-urllib` User-Agent** (`error code 1010`),
+  which looks exactly like an auth failure. httpx's default UA passes, so the app has
+  never hit this — it only bites one-off scripts against `api.cal.com`.
+- **`app/tools/booking/schedule.py` cannot be imported at module scope from
+  `app/brain/nodes/reason.py`.** `app/tools/__init__.py` pulls in the whole tool
+  registry, which reaches back through `app.flows` → `app.brain` → `app.brain.nodes` →
+  this module. The long-standing `from app.tools.registry import native_tools_for`
+  survives only because it resolves after that cycle unwinds; a second tools import that
+  ruff sorts *above* it does not. It's a function-level import with a comment saying so
+  — don't "tidy" it to the top.
 - **`parse_iso` reads a datetime as the tenant's LOCAL wall clock and discards any
   offset/'Z'** (`app/tools/formatting.py`). This is deliberate and load-bearing: the
   LLM routinely encodes a local date as UTC midnight (`2026-08-01T00:00:00Z` for

@@ -92,6 +92,23 @@ first — the config is silently reloaded to the current version) or a missing
 voice consent (surfaced as the server's own actionable message, which names
 the exact `onboard_tenant` command to run).
 
+**The Hours section has two states** (Phase 9.4). It fetches
+`GET /admin/api/tenants/{id}/calcom` on load and, when that comes back
+`connected: true`, renders Cal.com's actual schedule **read-only** with a
+"Managed in Cal.com" badge — the editable grid isn't shown at all, because
+for a Cal.com-backed bot editing it does nothing. The Booking section hides
+"Slot granularity" and "Lead time" in the same state, for the same reason;
+"How far ahead to look" and "Options to offer at once" stay, since Cal.com has
+no say in either. When the fetch **fails**, `calcom` stays `null` and the
+editable grid renders — the safe direction, since the alternative is hiding
+the only controls that work.
+
+A `timezone_matches: false` in that response raises a mismatch warning inside
+the Hours section. Cal.com has two timezones (the schedule's, which governs
+availability, and the account profile's, which governs how the dashboard
+displays bookings); this route can only see the first, so the warning tells
+the operator to check the second by hand.
+
 **The Danger Zone** (bottom of `Config.tsx`, operator-only, Phase 9 Part B)
 is Archive/Restore/Purge — a thin client over `POST /admin/api/tenants/
 {id}/archive`, `.../restore`, `.../purge`. Purge is disabled until the

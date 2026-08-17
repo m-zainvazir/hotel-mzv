@@ -45,11 +45,14 @@ from app.channels.ratelimit import enforce_admin_rate_limit
 from app.channels.test_links import mint_test_token
 from app.config import get_settings
 from app.db.factory import get_store
+from app.mcp.oauth import has_grant as has_calcom_grant
 from app.tenancy import admin as tenancy_admin
 from app.tenancy.loader import get_repository, get_tenant_config
 from app.tenancy.models import TenantConfig
 from app.tenancy.repository import TenantNotFoundError
+from app.tenancy.secrets import TenantSecretError, resolve_secret
 from app.tenancy.sync import TenantSyncError
+from app.tools.booking.schedule import availability_schedule_for
 
 logger = logging.getLogger(__name__)
 
@@ -483,6 +486,14 @@ class CreateTenantRequest(BaseModel):
     trade: str
     greeting: str
     escalation_phone: str
+    #: Phase 9.4. Supplied → this bot books against a real Cal.com calendar
+    #: (`mcp_calcom`) and Cal.com owns its availability. Omitted → the
+    #: simulated calendar, with the editable hours grid in the Config tab.
+    #: Templates deliberately still ship `"stub"`: a template carrying a
+    #: Cal.com provider with no event type would fail
+    #: `_calcom_tenants_declare_event_types` the moment it was loaded.
+    calcom_event_type_id: int | None = None
+    timezone: str | None = None
 
 
 class PurgeTenantRequest(BaseModel):
@@ -578,6 +589,17 @@ async def create_tenant_route(
         "widget_keys": [_generate_widget_key()],
         "status": "active",
     }
+    if payload.timezone:
+        merged["timezone"] = payload.timezone
+    if payload.calcom_event_type_id is not None:
+        # Same one-level-deeper merge as `emergency` above, and for the same
+        # reason: a template's `require_address` / `booking_field_map` are
+        # trade-specific and must survive being pointed at a real calendar.
+        merged["booking"] = {
+            **(base.get("booking") or {}),
+            "provider": "mcp_calcom",
+            "event_type_id": payload.calcom_event_type_id,
+        }
     try:
         proposed = TenantConfig.model_validate(merged)
     except ValidationError as exc:
@@ -846,6 +868,104 @@ async def search_knowledge_preview(
         min_similarity=tenant.knowledge.min_similarity,
     )
     return {"hits": [h.model_dump(mode="json") for h in hits]}
+
+
+_CALCOM_PROVIDERS = ("calcom", "mcp_calcom")
+
+
+async def _calcom_credential_problem(config: TenantConfig) -> str | None:
+    """The human sentence for why this bot isn't reaching Cal.com, or None."""
+    tenant_id = config.tenant_id
+    if config.booking.provider == "mcp_calcom":
+        if not await has_calcom_grant(tenant_id):
+            return (
+                "This bot hasn't been authorized against a Cal.com account yet. Run "
+                f"`python -m scripts.authorize_calcom --tenant {tenant_id}` and sign in "
+                "with the Cal.com account that owns the calendar."
+            )
+        return None
+
+    try:
+        api_key = await resolve_secret(tenant_id, "calcom_api_key", get_settings().calcom_api_key)
+    except TenantSecretError:
+        return "Could not read this bot's Cal.com credentials — try again in a moment."
+    if not api_key:
+        return "No Cal.com API key is configured for this bot."
+    return None
+
+
+@router.get("/tenants/{tenant_id}/calcom")
+async def get_calcom_status(
+    tenant_id: str, principal: AdminPrincipal = Depends(require_tenant_access)
+) -> dict:
+    """Phase 9.4: is this bot's availability actually owned by Cal.com?
+
+    Computed, never stored — a `calcom_connected` config flag would be a
+    fourth place for this to drift out of agreement with reality. Read
+    against the DRAFT config (like every other Config-tab read) so toggling
+    provider in the editor updates the panel before deploying.
+
+    `schedule` is the live answer from `check_availability`'s own source, so
+    the read-only hours the panel shows are the same ones the bot quotes.
+    """
+    try:
+        live = get_tenant_config(tenant_id)
+    except TenantNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+    draft, _ = await tenancy_admin.get_draft(tenant_id)
+    config = draft if draft is not None else live
+
+    body: dict = {
+        "provider": config.booking.provider,
+        "event_type_id": config.booking.event_type_id,
+        "connected": False,
+        "reason": None,
+        "schedule": None,
+        "timezone": None,
+        "timezone_matches": None,
+    }
+
+    if config.booking.provider not in _CALCOM_PROVIDERS:
+        body["reason"] = (
+            "This bot isn't connected to a calendar, so the opening hours below are what "
+            "it offers. Set a Cal.com event type to have a real calendar decide instead."
+        )
+        return body
+
+    if config.booking.event_type_id is None and any(
+        service.event_type_id is None for service in config.services
+    ):
+        body["reason"] = (
+            "Cal.com is selected but no event type is set, so nothing can be booked yet."
+        )
+        return body
+
+    problem = await _calcom_credential_problem(config)
+    if problem:
+        body["reason"] = problem
+        return body
+
+    body["connected"] = True
+    # `refresh=True`: the operator is looking at this panel *because* they
+    # want to know what Cal.com says right now — often straight after editing
+    # it there. Serving a 15-minute-old cache would make the panel look
+    # broken. This is the only caller that bypasses the cache.
+    schedule = await availability_schedule_for(config, refresh=True)
+    if schedule is None:
+        body["reason"] = (
+            "Connected, but Cal.com didn't return a schedule. Check that the account has "
+            "an availability schedule set up."
+        )
+        return body
+
+    body["schedule"] = schedule.model_dump(mode="json")
+    body["timezone"] = schedule.timezone
+    # The drift that makes a calendar show a different clock — and sometimes
+    # a different day — than the bot speaks. Two separate settings on
+    # Cal.com's side, neither of which this app can see from config alone.
+    body["timezone_matches"] = (not schedule.timezone) or schedule.timezone == config.timezone
+    return body
 
 
 @router.get("/tenants/{tenant_id}/metrics")

@@ -173,10 +173,25 @@ via `scripts.onboard_tenant` (see above).
   deliverability, not just syntax. Don't repoint
   `BOOKING_PLACEHOLDER_EMAIL_DOMAIN` at a domain that doesn't exist.
 
-**Once a tenant is on `"calcom"`, Cal.com owns availability — not this
-file.** `booking.hours`/`lead_time_hours`/`slot_granularity_minutes` become
-prompt copy only; the real schedule lives on the Cal.com event type. Keep
-them in sync by hand, or the bot will describe hours it can't actually book.
+**Once a tenant is on `"calcom"` or `"mcp_calcom"`, Cal.com owns availability
+— not this file.** As of Phase 9.4 that's enforced rather than merely
+documented: `hours` / `lead_time_hours` / `slot_granularity_minutes` are
+ignored outright for such a tenant (the admin panel doesn't even render
+them), and the hours the bot *quotes* are read live from the Cal.com schedule
+via `GET /v2/schedules` (`app/tools/booking/schedule.py`). There is nothing
+left to keep in sync by hand — edit the schedule in Cal.com and the bot
+follows on its next conversation.
+
+The `hours` grid still matters for a `"stub"` tenant, where it genuinely is
+the source of truth. A tenant with no calendar and no grid says so, rather
+than claiming it's shut every day.
+
+**Timezone is two settings on Cal.com's side, not one.** The *schedule's*
+timezone governs availability; the *account profile's* governs how the
+dashboard displays bookings. Both must match the tenant's own `timezone`, or
+the calendar shows a different clock — and sometimes a different day — than
+the bot speaks. The Config tab warns when the schedule's disagrees; the
+profile's is only visible in Cal.com itself.
 
 **Warm transfer** (voice only) is on by default whenever a tenant has an
 `emergency.escalation_phone`. Set `emergency.allow_warm_transfer: false` to

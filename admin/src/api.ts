@@ -199,6 +199,45 @@ export function getTenantConfig(tenantId: string): Promise<TenantDetail> {
   return request(`/tenants/${tenantId}`);
 }
 
+/** One recurring "these days, these times" rule (app/tools/booking/base.py). */
+export interface ScheduleWindow {
+  days: string[];
+  start: string;
+  end: string;
+}
+
+export interface AvailabilitySchedule {
+  windows: ScheduleWindow[];
+  timezone: string;
+  name: string;
+  /** "calcom" — a real calendar owns it; "config" — the grid below does. */
+  source: string;
+}
+
+/** Phase 9.4. Whether a real calendar owns this bot's availability, which is
+ *  what decides between an editable hours grid and a read-only one.
+ *
+ *  Keep these fields matching `GET /admin/api/tenants/{id}/calcom` exactly:
+ *  `tsc --noEmit` is the only guard the panel has against a wire-shape
+ *  change, and an inaccurate annotation here is what switches it off (see
+ *  the `createTenant`/`TenantDetail` bug in CLAUDE.md). */
+export interface CalcomStatus {
+  provider: string;
+  event_type_id: number | null;
+  connected: boolean;
+  /** Why not, in a sentence an operator can act on. Also set when connected
+   *  but the account returned no schedule. */
+  reason: string | null;
+  schedule: AvailabilitySchedule | null;
+  timezone: string | null;
+  /** null when unknown (not connected, or the schedule states no timezone). */
+  timezone_matches: boolean | null;
+}
+
+export function getCalcomStatus(tenantId: string): Promise<CalcomStatus> {
+  return request(`/tenants/${tenantId}/calcom`);
+}
+
 export function saveTenantDraft(
   tenantId: string,
   payload: Record<string, unknown>,
@@ -265,6 +304,11 @@ export interface CreateTenantPayload {
   trade: string;
   greeting: string;
   escalation_phone: string;
+  /** Phase 9.4. Set → the bot books against this real Cal.com event type
+   *  (provider `mcp_calcom`) and Cal.com owns its availability. null → the
+   *  simulated calendar with a hand-edited hours grid. */
+  calcom_event_type_id?: number | null;
+  timezone?: string;
 }
 
 // These three return a full TenantDetail (`{config, live_config, ...}`),

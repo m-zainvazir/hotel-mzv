@@ -2,7 +2,7 @@
   "tenant_id": "template",
   "name": "New Salon",
   "trade": "salon",
-  "timezone": "America/New_York",
+  "timezone": "Asia/Karachi",
   "status": "onboarding",
   "phone_numbers": [],
   "widget_keys": [],

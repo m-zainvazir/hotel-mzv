@@ -2,7 +2,7 @@
   "tenant_id": "hotel-mzv",
   "name": "Hotel_MZV",
   "trade": "hotel",
-  "timezone": "America/New_York",
+  "timezone": "Asia/Karachi",
   "status": "active",
   "phone_numbers": [
     "+15551230000"

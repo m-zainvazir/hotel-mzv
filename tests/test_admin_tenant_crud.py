@@ -480,6 +480,77 @@ class TestCreateTenantRoute:
         assert len(body["widget_keys"]) == 1
         assert body["emergency"]["escalation_phone"] == "+15550001111"
 
+    def _create(self, admin_client, monkeypatch, **extra):
+        async def _fake_create(config, *, client=None):
+            return config
+
+        async def _fake_version(tenant_id, *, client=None):
+            return "v1"
+
+        monkeypatch.setattr(admin_module.tenancy_admin, "create_tenant", _fake_create)
+        monkeypatch.setattr(admin_module.tenancy_admin, "get_tenant_version", _fake_version)
+        return admin_client.post(
+            "/admin/api/tenants",
+            json={
+                "mode": "blank",
+                "tenant_id": "a-calendar-bot",
+                "name": "A Calendar Bot",
+                "trade": "hotel",
+                "greeting": "Hi there",
+                "escalation_phone": "+15550001111",
+                **extra,
+            },
+            headers=_bearer(),
+        )
+
+    def test_an_event_type_puts_the_bot_on_a_real_calendar(self, admin_client, monkeypatch):
+        """Phase 9.4: filling the Cal.com field is what makes Cal.com own
+        this bot's availability. Nothing else in the form does."""
+        response = self._create(admin_client, monkeypatch, calcom_event_type_id=6446177)
+
+        booking = response.json()["config"]["booking"]
+        assert response.status_code == 201
+        assert booking["provider"] == "mcp_calcom"
+        assert booking["event_type_id"] == 6446177
+
+    def test_no_event_type_stays_on_the_simulated_calendar(self, admin_client, monkeypatch):
+        """The editable hours grid has to keep working for a bot with no
+        calendar behind it — that's the whole not-connected path."""
+        response = self._create(admin_client, monkeypatch)
+
+        assert response.json()["config"]["booking"]["provider"] == "stub"
+
+    def test_a_template_keeps_its_own_booking_fields(self, admin_client, monkeypatch):
+        """`require_address` is trade-specific (a plumber travels to you, a
+        hotel doesn't). Pointing a template at a calendar must not reset it —
+        the same one-level-deeper merge `emergency` already needed."""
+        response = self._create(
+            admin_client,
+            monkeypatch,
+            mode="template",
+            template="trades",
+            calcom_event_type_id=42,
+        )
+
+        booking = response.json()["config"]["booking"]
+        assert booking["provider"] == "mcp_calcom"
+        assert booking["require_address"] is True
+
+    def test_a_new_bot_defaults_to_the_configured_timezone(self, admin_client, monkeypatch):
+        response = self._create(admin_client, monkeypatch)
+        assert response.json()["config"]["timezone"] == "Asia/Karachi"
+
+    def test_an_explicit_timezone_is_honoured(self, admin_client, monkeypatch):
+        response = self._create(admin_client, monkeypatch, timezone="Europe/London")
+        assert response.json()["config"]["timezone"] == "Europe/London"
+
+    def test_a_bad_timezone_is_a_422_not_a_500(self, admin_client, monkeypatch):
+        """ZoneInfoNotFoundError subclasses KeyError, which Pydantic doesn't
+        wrap — this is the same trap `_real_timezone` already guards."""
+        response = self._create(admin_client, monkeypatch, timezone="Mars/Olympus_Mons")
+        assert response.status_code == 422
+        assert ["timezone"] in [error["loc"] for error in response.json()["detail"]]
+
     def test_illegal_tenant_id_slug_422s(self, admin_client):
         response = admin_client.post(
             "/admin/api/tenants",
