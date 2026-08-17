@@ -226,3 +226,51 @@ class TestSetTenantSecret:
         client, _ = mock_http(handler)
         with pytest.raises(TenantSecretError):
             await set_tenant_secret("hotel-mzv", "calcom_api_key", "cal_new_key", client=client)
+
+    async def test_a_write_invalidates_the_read_cache(self):
+        """Phase 9.4. Cal.com rotates the OAuth refresh token on every refresh
+        and invalidates the previous one at once, so serving a cached copy
+        after a write means presenting a spent token — which an authorization
+        server may treat as replay and revoke the whole grant over. Observed
+        live: the token endpoint kept returning 200 while every token it
+        issued was rejected by both mcp.cal.com and api.cal.com.
+
+        The 300s read cache made that window five minutes wide.
+        """
+        served = ["old_refresh_token", "new_refresh_token"]
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path.endswith("set_tenant_secret"):
+                return httpx.Response(204)
+            return httpx.Response(200, json=served.pop(0) if served else None)
+
+        client, _ = mock_http(handler)
+        assert await get_tenant_secret("t", "calcom_mcp_refresh_token", client=client) == (
+            "old_refresh_token"
+        )
+
+        await set_tenant_secret("t", "calcom_mcp_refresh_token", "new_refresh_token", client=client)
+
+        # Without the invalidation this reads "old_refresh_token" from cache.
+        assert await get_tenant_secret("t", "calcom_mcp_refresh_token", client=client) == (
+            "new_refresh_token"
+        )
+
+    async def test_a_write_leaves_other_keys_cached(self):
+        """Scoped to the one key written — dropping the whole tenant's cache
+        would put a Supabase round trip back on the booking path for every
+        unrelated credential."""
+        calls: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path.endswith("set_tenant_secret"):
+                return httpx.Response(204)
+            calls.append(json.loads(request.content)["key_name"])
+            return httpx.Response(200, json="value")
+
+        client, _ = mock_http(handler)
+        await get_tenant_secret("t", "calcom_api_key", client=client)
+        await set_tenant_secret("t", "calcom_mcp_refresh_token", "rotated", client=client)
+        await get_tenant_secret("t", "calcom_api_key", client=client)
+
+        assert calls == ["calcom_api_key"]

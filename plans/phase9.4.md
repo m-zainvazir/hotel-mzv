@@ -370,11 +370,55 @@ stdin as cp1252 on this box. `PYTHONIOENCODING=utf-8` plus `urllib` (which decod
 spec) shows the data is clean. Same trap CLAUDE.md already records for *writing* config from a
 Windows shell; it applies to reading it back too.
 
+### Step 6 attempt — blocked on a dead Cal.com grant, and it found a real bug
+
+The grant was authorized interactively and `has_grant("hotel-mzv")` returned True (and correctly
+False for `northside-plumbing` — the Vault scoping holds). **The provider was not flipped**, because
+testing the MCP path in memory first — the whole point of testing before writing config — failed:
+
+```
+McpBookingProvider.check_availability -> BookingError: could not reach the calendar
+  caused by: httpx 401 Unauthorized for https://mcp.cal.com/mcp
+```
+
+What the diagnosis established, in order:
+
+1. `access_token_for("hotel-mzv")` **succeeds** — the token endpoint returns 200 with a real
+   `expires_in: 3600` and `token_type: bearer`.
+2. That token is rejected as `invalid_token` ("Invalid or expired access token") by
+   `mcp.cal.com/mcp` — reproduced with a hand-rolled `initialize` POST, so it isn't the MCP client
+   library's doing.
+3. The same token is **also** rejected by `api.cal.com/v2/me` (`UnauthorizedException`). So the
+   token is not merely unaccepted by one resource server; it is dead everywhere.
+4. Adding RFC 8707 `resource=https://mcp.cal.com` to the refresh request changes nothing (the token
+   endpoint still returns 200, the resource server still 401s), so audience binding is not the gap.
+
+**Conclusion:** the authorization server is happily minting tokens against a grant it no longer
+honours. Not recoverable from this side — it needs a fresh authorization.
+
+**The bug found along the way, which is a plausible cause and is fixed:**
+`set_tenant_secret` did not invalidate `get_tenant_secret`'s read cache (300s TTL). Cal.com
+**rotates the refresh token on every single refresh** and invalidates the previous one immediately;
+`access_token_for` persists the rotated value, but any read within the next five minutes in that
+process kept returning the spent one. Presenting a spent refresh token is exactly the pattern
+RFC 6819 §5.2.2.3 tells an authorization server to treat as replay — and revoking the grant while
+still answering refresh calls is a defensible way to respond to it. Reproduced the shadowing
+directly (probe B above hit `invalid_grant` for precisely this reason), fixed in
+`app/tenancy/secrets.py`, and guarded by
+`test_tenant_secrets.py::test_a_write_invalidates_the_read_cache` — verified to fail without the
+fix (`assert 'old_refresh_token' == 'new_refresh_token'`).
+
+**`scripts/authorize_calcom.py` now verifies the grant before reporting success** (`_verify_grant`):
+it clears the secret cache, goes through the *headless* refresh path rather than reusing the code
+exchange's own access token, and opens a real `initialize` against the MCP server. Storing a token
+and printing ✓ was one round trip short of knowing anything — this exact failure was invisible until
+a booking attempt, where it surfaces as "could not reach the calendar", which points at the network
+instead of at the grant.
+
 ### Still to do
 
-- **Step 6** — `python -m scripts.authorize_calcom --tenant hotel-mzv`. Interactive: it opens a
-  browser for the Cal.com sign-in, so it can't be run unattended. Then flip `booking.provider` to
-  `mcp_calcom` and re-verify a real availability query and a real booking. Everything else in this
-  phase works on either provider, so this is the one genuinely blocked item.
-- **`northside-plumbing`'s deploy** — its pending greeting draft is the operator's call.
-- **Deploy** — nothing here is pushed to GitHub/Railway yet.
+- **Step 6** — re-run `python -m scripts.authorize_calcom --tenant hotel-mzv` now that the cache fix
+  is in. It will say plainly whether the new grant works. Then flip `booking.provider` to
+  `mcp_calcom` and verify a real availability query and a real booking. Everything else in this
+  phase works identically on the REST provider hotel-mzv is on today, so nothing is degraded while
+  this waits.

@@ -970,11 +970,13 @@ working-looking controls for the one that had no effect. Now:
   `_calcom_tenants_declare_event_types` at load.
 - **Live-verified**: hotel-mzv answers "what time do you open?" with Cal.com's
   own `7:00 AM to 10:00 PM`, and returns real slots at `+05:00`.
-- **Still open**: `hotel-mzv` is still on REST `"calcom"`, not `mcp_calcom` —
-  that needs the interactive `python -m scripts.authorize_calcom --tenant
-  hotel-mzv`. And `northside-plumbing`'s timezone is staged in a draft it
-  already had (a greeting with a doubled `?`), so deploying it is a decision,
-  not a mechanical step.
+- **Still open**: `hotel-mzv` is still on REST `"calcom"`, not `mcp_calcom`. It
+  was authorized, but the grant came back dead — the token endpoint minted
+  tokens that `mcp.cal.com` and `api.cal.com` both rejected. That hunt turned
+  up the `set_tenant_secret` cache bug (see the gotcha below), which is fixed;
+  re-running `python -m scripts.authorize_calcom --tenant hotel-mzv` now
+  verifies the grant end to end instead of assuming it. Nothing is degraded
+  meanwhile: the REST provider works and Cal.com owns the hours either way.
 
 ## Gotchas learned the hard way
 - **`/widget.js` must send `Cache-Control: no-cache`, never `immutable`.**
@@ -1175,6 +1177,26 @@ working-looking controls for the one that had no effect. Now:
 - **Cal.com's Cloudflare 403s a bare `Python-urllib` User-Agent** (`error code 1010`),
   which looks exactly like an auth failure. httpx's default UA passes, so the app has
   never hit this — it only bites one-off scripts against `api.cal.com`.
+- **`set_tenant_secret` must invalidate the read cache, and that is a correctness
+  requirement, not hygiene.** `get_tenant_secret` caches for `secret_cache_ttl_seconds`
+  (300s). **Cal.com rotates the OAuth refresh token on every single refresh** and
+  invalidates the previous one immediately; `access_token_for` persists the new value, so
+  without the invalidation the same process keeps handing out the spent one for up to five
+  minutes. Presenting a spent refresh token is the textbook replay signature (RFC 6819
+  §5.2.2.3) and an authorization server may respond by revoking the entire grant.
+  Observed live on `hotel-mzv`: the token endpoint kept returning 200 with a real
+  `expires_in` while every token it issued was rejected as `invalid_token` by **both**
+  `mcp.cal.com` and `api.cal.com` — a grant that looks alive from the token endpoint and
+  is dead everywhere else. Guarded by
+  `test_tenant_secrets.py::test_a_write_invalidates_the_read_cache`, verified to fail
+  without the fix.
+- **A stored Cal.com grant proves nothing until a real tool call goes through it.**
+  `scripts/authorize_calcom.py::_verify_grant` deliberately exercises the *headless*
+  refresh path (not the code exchange's own access token — the exchange looked perfect in
+  the failure above) and opens a live `initialize`. Without it, a dead grant first surfaces
+  as `BookingError("could not reach the calendar")` on a real booking attempt, which reads
+  as a network problem and sends you looking in the wrong place entirely. Don't remove the
+  verification to make the script faster.
 - **`app/tools/booking/schedule.py` cannot be imported at module scope from
   `app/brain/nodes/reason.py`.** `app/tools/__init__.py` pulls in the whole tool
   registry, which reaches back through `app.flows` → `app.brain` → `app.brain.nodes` →

@@ -171,6 +171,23 @@ async def set_tenant_secret(
             f"{response.text[:200]}"
         )
 
+    # Phase 9.4: a write must never be shadowed by a stale read. `get_tenant_secret`
+    # caches for `secret_cache_ttl_seconds` (300s by default), so without this the
+    # process that just rotated a value keeps handing out the old one for up to five
+    # minutes.
+    #
+    # This is not hygiene, it is a correctness requirement for one caller in
+    # particular: Cal.com rotates the OAuth refresh token on EVERY refresh and
+    # invalidates the previous one immediately (`app/mcp/oauth.py::access_token_for`
+    # persists the new one right here). Serving the stale copy afterwards means
+    # presenting a spent refresh token — which an authorization server is entitled to
+    # read as replay and respond to by revoking the whole grant, not just failing the
+    # one request. Observed live: the token endpoint kept returning 200 with an
+    # `expires_in` while every token it issued was rejected by both mcp.cal.com and
+    # api.cal.com.
+    with _lock:
+        _cache.pop((tenant_id, key_name), None)
+
 
 def _admin_client(settings) -> httpx.AsyncClient:
     return httpx.AsyncClient(

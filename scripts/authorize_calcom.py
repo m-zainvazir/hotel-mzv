@@ -30,6 +30,7 @@ import webbrowser
 from dataclasses import dataclass, field
 from urllib.parse import parse_qs, urlsplit
 
+import httpx
 from rich.console import Console
 
 from app.config import get_settings
@@ -182,12 +183,91 @@ async def _run(tenant_id: str, *, port: int, scope: str | None, open_browser: bo
         console.print(f"[bold red]could not store the grant in Vault:[/bold red] {exc}")
         return 1
 
+    # Phase 9.4: prove the stored grant actually works before claiming success.
+    #
+    # Storing a refresh token and reporting ✓ used to be the end of it, and that
+    # is one round trip short of knowing anything. Observed live on `hotel-mzv`:
+    # a grant that refreshed cleanly (HTTP 200, a real `expires_in`) while every
+    # access token it issued was rejected as `invalid_token` by mcp.cal.com AND
+    # api.cal.com. Nothing surfaced until the first real booking attempt, where it
+    # arrives as "could not reach the calendar" — a message that points at the
+    # network rather than at the grant.
+    console.print("[dim]verifying the grant against the MCP server...[/dim]")
+    problem = await _verify_grant(tenant_id)
+    if problem:
+        console.print(
+            f"[bold red]the grant was stored but does not work:[/bold red] {problem}\n"
+            "Nothing has been left half-written — the tenant's Vault entries are in "
+            'place — but do NOT switch booking.provider to "mcp_calcom" until this '
+            "passes, or availability and booking will fail on every call. Re-running "
+            "this command starts a completely fresh authorization, which is the first "
+            "thing to try."
+        )
+        return 1
+
     console.print(
-        f"\n[green]✓[/green] {tenant_id} is authorized against Cal.com's MCP server. "
+        f"\n[green]✓[/green] {tenant_id} is authorized against Cal.com's MCP server, "
+        "and a real tool call through that grant succeeded. "
         'Set booking.provider to "mcp_calcom" in its config to start using it '
         '(content/README.md\'s "Booking via MCP" section).'
     )
     return 0
+
+
+async def _verify_grant(tenant_id: str) -> str | None:
+    """None when the stored grant can really open an MCP session, else why not.
+
+    Deliberately exercises the *headless* path — `access_token_for`, a refresh
+    against the token endpoint, then a live `initialize` — rather than reusing the
+    access token from the code exchange above. The refresh is the half that runs
+    forever in production, and the observed failure was specific to it: the code
+    exchange looked perfect.
+    """
+    from app.mcp.oauth import access_token_for
+    from app.tenancy.secrets import clear_secret_cache
+
+    # The refresh token was written seconds ago; drop the read cache so this
+    # verification reads what is actually in Vault.
+    clear_secret_cache()
+    settings = get_settings()
+    try:
+        token = await access_token_for(tenant_id)
+    except CalcomOAuthError as exc:
+        return f"could not obtain an access token: {exc}"
+
+    body = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-06-18",
+            "capabilities": {},
+            "clientInfo": {"name": "ai-receptionist-authorize", "version": "1"},
+        },
+    }
+    try:
+        async with httpx.AsyncClient(timeout=settings.calcom_mcp_timeout_seconds) as client:
+            response = await client.post(
+                settings.calcom_mcp_url,
+                json=body,
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Accept": "application/json, text/event-stream",
+                    "Content-Type": "application/json",
+                },
+            )
+    except httpx.HTTPError as exc:
+        return f"could not reach {settings.calcom_mcp_url}: {type(exc).__name__}: {exc}"
+
+    if response.status_code == 401:
+        return (
+            "the MCP server rejected a freshly refreshed access token (401 "
+            f"{response.text[:120]}). The refresh endpoint accepted the grant, so this "
+            "is Cal.com refusing the token it just issued — the grant is not usable."
+        )
+    if response.status_code >= 400:
+        return f"MCP initialize returned {response.status_code}: {response.text[:160]}"
+    return None
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
