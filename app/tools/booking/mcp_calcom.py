@@ -574,6 +574,31 @@ async def _get_session(tenant_id: str, settings: Settings, connector: Connector)
     ):
         return cached[3]
 
+    try:
+        return await _open_session(tenant_id, connection, connector, now)
+    except _ConnectAuthError:
+        # Phase 9.4. The MCP handshake carries the Authorization header, so a
+        # stale access token 401s HERE, before any tool call. `_call_tool`
+        # already invalidates on a 401 mid-call; this path did not, so one bad
+        # token poisoned every request for the rest of its ~1h cache life —
+        # and re-authorizing the tenant didn't help, because nothing dropped
+        # the cached token. Observed live in production: `check_availability`
+        # returned nothing at all for hours after a grant was replaced.
+        #
+        # Retry exactly once with a freshly minted token. If that 401s too,
+        # the grant really is bad and the caller gets the normal error.
+        logger.info("calcom mcp handshake rejected the token for %s — reauthenticating", tenant_id)
+        invalidate_oauth_token(tenant_id)
+        connection = await _connection_for(tenant_id, settings)
+        try:
+            return await _open_session(tenant_id, connection, connector, time.monotonic())
+        except _ConnectAuthError as exc:
+            raise BookingError("the calendar rejected this business's authorization") from exc
+
+
+async def _open_session(
+    tenant_id: str, connection: dict[str, Any], connector: Connector, now: float
+) -> Any:
     stack = AsyncExitStack()
     try:
         session = await stack.enter_async_context(connector(connection))
@@ -582,6 +607,8 @@ async def _get_session(tenant_id: str, settings: Settings, connector: Connector)
         raise
     except Exception as exc:
         await stack.aclose()
+        if _connect_failure_is_auth(exc):
+            raise _ConnectAuthError from exc
         raise BookingError("could not reach the calendar") from exc
 
     old_stack: AsyncExitStack | None = None
@@ -589,12 +616,36 @@ async def _get_session(tenant_id: str, settings: Settings, connector: Connector)
         existing = _session_cache.get(tenant_id)
         if existing is not None:
             old_stack = existing[2]
-        _session_cache[tenant_id] = (now, fingerprint, stack, session)
+        _session_cache[tenant_id] = (now, _fingerprint(connection), stack, session)
 
     if old_stack is not None:
         await old_stack.aclose()
 
     return session
+
+
+class _ConnectAuthError(Exception):
+    """Internal: the MCP handshake was rejected as unauthorized."""
+
+
+def _connect_failure_is_auth(exc: BaseException, _depth: int = 0) -> bool:
+    """True when a connect failure is really a 401, however deeply wrapped.
+
+    The mcp SDK opens its transport inside an anyio task group, so an
+    `httpx.HTTPStatusError: 401` surfaces as `ExceptionGroup: unhandled errors
+    in a TaskGroup` whose own `str()` mentions neither the status nor the URL.
+    Matching on the group's message alone would never fire, so walk into it.
+    """
+    if _depth > 4:
+        return False
+    text = str(exc).lower()
+    if any(marker in text for marker in ("401", "unauthorized", "invalid_token")):
+        return True
+    for nested in getattr(exc, "exceptions", ()) or ():
+        if _connect_failure_is_auth(nested, _depth + 1):
+            return True
+    cause = exc.__cause__ or exc.__context__
+    return bool(cause) and _connect_failure_is_auth(cause, _depth + 1)
 
 
 async def _drop_session(tenant_id: str) -> None:

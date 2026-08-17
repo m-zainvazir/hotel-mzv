@@ -497,3 +497,109 @@ class TestSessionCaching:
         # closed session — the cache was actually cleared, not just closed.
         await provider.check_availability(tenant, service)
         assert closed["n"] == 1  # second session still open (not closed again)
+
+
+class TestHandshakeAuthRecovery:
+    """Phase 9.4. The MCP handshake carries the Authorization header, so a
+    stale access token 401s at *connect* time, before any tool call.
+
+    `_call_tool` has always invalidated on a mid-call 401; this path did not,
+    so one bad token poisoned every request for the rest of its ~1h cache
+    life — and re-authorizing the tenant did not help, because nothing
+    dropped the cached token. Found in production: `check_availability`
+    returned nothing at all, for hours, after a grant was replaced.
+    """
+
+    @staticmethod
+    def _wrapped_401() -> BaseException:
+        """A 401 shaped the way the mcp SDK actually delivers one: buried in
+        an anyio ExceptionGroup whose own str() mentions neither the status
+        nor the URL. Matching the outer message alone never fires."""
+        inner = RuntimeError("Client error '401 Unauthorized' for url 'https://mcp.cal.com/mcp'")
+        return BaseExceptionGroup("unhandled errors in a TaskGroup (1 sub-exception)", [inner])
+
+    async def test_a_401_handshake_drops_the_token_and_retries_once(self, hotel, monkeypatch):
+        tenant = _hotel_mcp(hotel)
+        service = tenant.service_by_slug("spa-treatment")
+        attempts = {"n": 0}
+        invalidated: list[str] = []
+
+        @asynccontextmanager
+        async def flaky_connector(_connection: dict[str, Any]):
+            attempts["n"] += 1
+            if attempts["n"] == 1:
+                raise self._wrapped_401()
+            yield _FakeSession(_ok({}))
+
+        async def fake_connection_for(_tenant_id: str, _settings: Settings) -> dict[str, Any]:
+            return {"url": "https://mcp.cal.com/mcp", "headers": {"Authorization": "Bearer x"}}
+
+        monkeypatch.setattr("app.tools.booking.mcp_calcom._connection_for", fake_connection_for)
+        monkeypatch.setattr(
+            "app.tools.booking.mcp_calcom.invalidate_oauth_token", invalidated.append
+        )
+
+        provider = McpBookingProvider(connector=flaky_connector, settings=_settings())
+        await provider.check_availability(tenant, service)
+
+        assert attempts["n"] == 2, "should have reconnected with a fresh token"
+        assert invalidated == [tenant.tenant_id], "the stale access token must be dropped"
+
+    async def test_a_second_401_gives_up_rather_than_looping(self, hotel, monkeypatch):
+        tenant = _hotel_mcp(hotel)
+        service = tenant.service_by_slug("spa-treatment")
+        attempts = {"n": 0}
+
+        @asynccontextmanager
+        async def always_401(_connection: dict[str, Any]):
+            attempts["n"] += 1
+            raise self._wrapped_401()
+            yield  # pragma: no cover - keeps this an async generator
+
+        async def fake_connection_for(_tenant_id: str, _settings: Settings) -> dict[str, Any]:
+            return {"url": "https://mcp.cal.com/mcp", "headers": {}}
+
+        monkeypatch.setattr("app.tools.booking.mcp_calcom._connection_for", fake_connection_for)
+        monkeypatch.setattr("app.tools.booking.mcp_calcom.invalidate_oauth_token", lambda _t: None)
+
+        provider = McpBookingProvider(connector=always_401, settings=_settings())
+        with pytest.raises(BookingError):
+            await provider.check_availability(tenant, service)
+
+        assert attempts["n"] == 2, "exactly one retry — a genuinely dead grant must not loop"
+
+    async def test_a_non_auth_failure_is_not_retried(self, hotel, monkeypatch):
+        """Retrying a dead server just doubles the caller's wait."""
+        tenant = _hotel_mcp(hotel)
+        service = tenant.service_by_slug("spa-treatment")
+        attempts = {"n": 0}
+
+        @asynccontextmanager
+        async def dead(_connection: dict[str, Any]):
+            attempts["n"] += 1
+            raise ConnectionError("dead server")
+            yield  # pragma: no cover
+
+        async def fake_connection_for(_tenant_id: str, _settings: Settings) -> dict[str, Any]:
+            return {"url": "https://mcp.cal.com/mcp", "headers": {}}
+
+        monkeypatch.setattr("app.tools.booking.mcp_calcom._connection_for", fake_connection_for)
+
+        provider = McpBookingProvider(connector=dead, settings=_settings())
+        with pytest.raises(BookingError):
+            await provider.check_availability(tenant, service)
+
+        assert attempts["n"] == 1
+
+    def test_the_401_detector_walks_nested_groups_and_causes(self):
+        from app.tools.booking.mcp_calcom import _connect_failure_is_auth
+
+        assert _connect_failure_is_auth(self._wrapped_401())
+        assert _connect_failure_is_auth(RuntimeError("invalid_token"))
+
+        chained = RuntimeError("could not connect")
+        chained.__cause__ = RuntimeError("401 Unauthorized")
+        assert _connect_failure_is_auth(chained)
+
+        assert not _connect_failure_is_auth(ConnectionError("dead server"))
+        assert not _connect_failure_is_auth(TimeoutError("too slow"))

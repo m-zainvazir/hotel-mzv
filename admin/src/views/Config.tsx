@@ -885,8 +885,9 @@ function HoursSection({
         <p class="admin-muted">
           This bot's availability comes from its Cal.com schedule
           {calcom.schedule?.name ? ` ("${calcom.schedule.name}")` : ""} — the same source it books
-          against. To change when it can take appointments, edit that schedule in Cal.com; it
-          applies here on the next conversation.
+          against. To change when it can take appointments, edit that schedule in Cal.com. What you
+          see here is read live; the bot caches these hours for a few minutes, so reload this page
+          after editing and the bot picks up the change straight away.
         </p>
         {calcom.schedule ? (
           <table class="admin-table">

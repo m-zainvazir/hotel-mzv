@@ -334,6 +334,74 @@ class TestAccessTokenFor:
             await access_token_for("hotel-mzv", client=client)
 
 
+class TestRotationRace:
+    """Phase 9.4. Cal.com rotates the refresh token on EVERY refresh and kills
+    the previous one, so a grant shared by more than one process — a dev box
+    and Railway serving the same tenant, or two replicas — is a rotation race
+    by construction. Whichever refreshes second presents a spent token.
+
+    The loser's recovery is simply to re-read: the winner persisted the new
+    token to Vault before handing its own out.
+    """
+
+    async def test_a_spent_token_is_retried_with_the_one_vault_now_holds(self, monkeypatch):
+        vault = {
+            "calcom_mcp_refresh_token": "rt_spent",
+            "calcom_mcp_client_id": "client_stored",
+            "calcom_mcp_client_secret": None,
+        }
+        invalidated: list[str] = []
+
+        async def reading_resolve(tenant_id, key_name, *args, **kwargs):
+            return vault.get(key_name)
+
+        def on_invalidate(tenant_id: str) -> None:
+            invalidated.append(tenant_id)
+            # Another process rotated it while we were holding the old value.
+            vault["calcom_mcp_refresh_token"] = "rt_current"
+
+        monkeypatch.setattr("app.mcp.oauth.resolve_secret", reading_resolve)
+        monkeypatch.setattr("app.mcp.oauth.invalidate_tenant_secret_cache", on_invalidate)
+
+        seen: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/oauth/token":
+                token = _form_body(request)["refresh_token"]
+                seen.append(token)
+                if token == "rt_spent":
+                    return httpx.Response(400, json={"error": "invalid_grant"})
+                return httpx.Response(200, json={"access_token": "at_ok", "expires_in": 3600})
+            return _discovery_handler(request)
+
+        client, _requests = mock_http(handler)
+        assert await access_token_for("hotel-mzv", client=client) == "at_ok"
+
+        assert seen == ["rt_spent", "rt_current"]
+        assert invalidated == ["hotel-mzv"]
+
+    async def test_an_unchanged_token_is_not_retried(self, monkeypatch):
+        """Nothing rotated underneath us, so the grant really is dead —
+        retrying with the identical value would just burn a second request
+        and muddy the error."""
+        monkeypatch.setattr("app.mcp.oauth.resolve_secret", _fake_resolve_secret)
+        monkeypatch.setattr("app.mcp.oauth.invalidate_tenant_secret_cache", lambda _t: None)
+
+        attempts: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/oauth/token":
+                attempts.append(_form_body(request)["refresh_token"])
+                return httpx.Response(400, json={"error": "invalid_grant"})
+            return _discovery_handler(request)
+
+        client, _requests = mock_http(handler)
+        with pytest.raises(CalcomOAuthError):
+            await access_token_for("hotel-mzv", client=client)
+
+        assert len(attempts) == 1
+
+
 # --- redaction -------------------------------------------------------------
 
 

@@ -231,6 +231,20 @@ async def delete_tenant_secrets(tenant_id: str, *, client: httpx.AsyncClient | N
             del _cache[key]
 
 
+def invalidate_tenant_secret_cache(tenant_id: str) -> None:
+    """Forget everything cached for one tenant, so the next read hits Vault.
+
+    Phase 9.4. Unlike `clear_secret_cache` (a test hook) this is a production
+    path: a credential can be rotated by a *different process* — Cal.com
+    rotates the OAuth refresh token on every refresh, and a dev box and a
+    deployed replica share one grant — in which case the only way to recover
+    is to stop trusting the local copy and read again.
+    """
+    with _lock:
+        for key in [k for k in _cache if k[0] == tenant_id]:
+            del _cache[key]
+
+
 def clear_secret_cache() -> None:
     """Test hook — drop cached secrets so a swapped vault value takes effect."""
     with _lock:

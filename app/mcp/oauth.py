@@ -61,7 +61,12 @@ from urllib.parse import urlencode, urlsplit
 import httpx
 
 from app.config import get_settings
-from app.tenancy.secrets import TenantSecretError, resolve_secret, set_tenant_secret
+from app.tenancy.secrets import (
+    TenantSecretError,
+    invalidate_tenant_secret_cache,
+    resolve_secret,
+    set_tenant_secret,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -307,15 +312,43 @@ async def access_token_for(tenant_id: str, *, client: httpx.AsyncClient | None =
     refresh_token, client_id, client_secret = await _load_credentials(tenant_id)
     metadata = await _cached_metadata(settings.calcom_mcp_url, client=client)
 
-    body = {
-        "grant_type": "refresh_token",
-        "refresh_token": refresh_token,
-        "client_id": client_id,
-    }
-    if client_secret:
-        body["client_secret"] = client_secret
+    def _body(token: str, cid: str, secret: str | None) -> dict[str, str]:
+        body = {"grant_type": "refresh_token", "refresh_token": token, "client_id": cid}
+        if secret:
+            body["client_secret"] = secret
+        return body
 
-    data = await _post_token(metadata.token_endpoint, body, client=client)
+    try:
+        data = await _post_token(
+            metadata.token_endpoint, _body(refresh_token, client_id, client_secret), client=client
+        )
+    except CalcomOAuthError:
+        # Phase 9.4: Cal.com rotates the refresh token on EVERY refresh and
+        # invalidates the previous one, so a grant shared by more than one
+        # process — a dev box and Railway both serving the same tenant, or two
+        # replicas — is a rotation race by construction. Whichever process
+        # refreshes second presents a value the other already spent.
+        #
+        # The loser's fix is simply to re-read: the winner persisted the new
+        # token to Vault before handing its own out. Drop the cached copy,
+        # read again, and try once more. A genuinely revoked grant fails the
+        # retry too and raises normally, so this can't mask a dead grant — and
+        # it can't loop, since the retry never retries itself.
+        invalidate_tenant_secret_cache(tenant_id)
+        retry_token, retry_client_id, retry_secret = await _load_credentials(tenant_id)
+        if retry_token == refresh_token:
+            raise  # nothing changed underneath us — the grant really is bad
+        logger.info(
+            "calcom oauth refresh for %s lost a rotation race — retrying with the "
+            "token another process just persisted",
+            tenant_id,
+        )
+        data = await _post_token(
+            metadata.token_endpoint,
+            _body(retry_token, retry_client_id, retry_secret),
+            client=client,
+        )
+        refresh_token = retry_token
 
     try:
         access_token = data["access_token"]
