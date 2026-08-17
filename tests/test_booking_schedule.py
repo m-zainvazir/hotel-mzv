@@ -156,6 +156,48 @@ class TestCalcomSchedule:
         assert await provider.availability_schedule(hotel) is None
 
 
+class TestScheduleShapes:
+    """The two Cal.com transports deliver the same fields in different
+    wrappers, and `_schedule_from_calcom` is the one mapper for both.
+
+    This shipped broken once: MCP's `get_default_schedule` returns a single
+    dict (its envelope already stripped by `_call_tool`) where REST returns a
+    list. The mapper only understood the list, so the admin panel showed
+    "Cal.com didn't return a schedule" with nothing logged — a silent None,
+    not an error.
+    """
+
+    _RULES = [{"days": ["Monday"], "startTime": "09:00", "endTime": "17:00"}]
+
+    @pytest.mark.parametrize(
+        ("payload", "label"),
+        [
+            ([{"name": "L", "timeZone": "UTC", "availability": _RULES}], "REST: bare list"),
+            (
+                {"data": [{"name": "L", "timeZone": "UTC", "availability": _RULES}]},
+                "REST: enveloped list",
+            ),
+            ({"name": "S", "timeZone": "UTC", "availability": _RULES}, "MCP: bare dict"),
+            (
+                {"data": {"name": "S", "timeZone": "UTC", "availability": _RULES}},
+                "MCP: enveloped dict",
+            ),
+        ],
+    )
+    def test_every_wrapper_maps(self, payload, label):
+        from app.tools.booking.calcom import _schedule_from_calcom
+
+        schedule = _schedule_from_calcom(payload)
+        assert schedule is not None, label
+        assert schedule.summary() == "Mon 09:00-17:00", label
+
+    @pytest.mark.parametrize("payload", [None, [], {}, {"data": []}, "not json", 42])
+    def test_junk_is_none_not_a_crash(self, payload):
+        from app.tools.booking.calcom import _schedule_from_calcom
+
+        assert _schedule_from_calcom(payload) is None
+
+
 class TestCacheAndDegradation:
     """`reason` renders the prompt every single turn, so this lookup sits on
     the latency budget. It must be cached, and it must never raise."""

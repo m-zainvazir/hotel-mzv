@@ -21,6 +21,7 @@ from app.brain.state import ReceptionistState
 from app.config import get_settings
 from app.mcp.client import load_mcp_tools
 from app.tenancy.loader import tenant_config_from_runnable
+from app.tools.booking.schedule import business_hours_for
 from app.tools.registry import native_tools_for
 
 logger = logging.getLogger(__name__)
@@ -51,14 +52,6 @@ async def reason(state: ReceptionistState, config: RunnableConfig) -> dict:
     # tenant's calendar, not its config. Cached per tenant, so this is an
     # in-memory read on all but the first turn after a config change; it
     # never raises (see that module's docstring).
-    #
-    # Imported here, not at module scope: `app/tools/__init__.py` pulls in the
-    # whole tool registry, which reaches back through app.flows -> app.brain
-    # -> this module. `from app.tools.registry import ...` above survives that
-    # only because it resolves after the cycle has already unwound; a second,
-    # alphabetically-earlier tools import does not.
-    from app.tools.booking.schedule import business_hours_for
-
     business_hours = await business_hours_for(tenant)
 
     prompt = [

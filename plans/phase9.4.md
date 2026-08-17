@@ -291,14 +291,25 @@ Then, against the real project:
 - **Step 5.** New Bot gained an optional **Cal.com event type ID** (filled → `mcp_calcom`) and a
   timezone picker; the form names the `authorize_calcom` command for that exact tenant id.
 
-**Step 0 was answered by REST, not the MCP spike.** `GET /v2/schedules`
-(`cal-api-version: 2024-06-11`) returns exactly the shape needed —
-`{name, timeZone, availability: [{days, startTime, endTime}], isDefault, overrides}` — verified
-live against this project's own account. So `business_hours` reads a real schedule on both Cal.com
-providers, and the MCP-native path is moot for now: `McpBookingProvider.availability_schedule`
-delegates to the REST one deliberately (see its docstring). The alternative — inferring hours from
-a `get_availability` sweep — was rejected as actively wrong: a fully-booked Tuesday would come back
-empty and the bot would tell callers it's closed on Tuesdays.
+**Step 0, done properly once a working grant existed.** `session.list_tools()` against
+`https://mcp.cal.com/mcp` returns **59 tools**, far more than the four this codebase knew about,
+including a full schedule family: `get_default_schedule`, `get_schedules`, `get_schedule`,
+`create_schedule`, `update_schedule`, `delete_schedule` — plus `get_busy_times`,
+`get_connected_calendars`, `confirm_booking`, `mark_booking_absent`, and a large org/team/routing
+surface.
+
+This **corrects a claim made earlier in this phase from the docs rather than the server**: the
+first version of `McpBookingProvider.availability_schedule` said Cal.com's MCP server "exposes no
+schedule tool" and delegated to REST for that reason. It does expose one. `get_default_schedule`
+takes no arguments and returns byte-identical JSON to the REST endpoint, so
+`_schedule_from_calcom` maps both and the provider now reads it natively. That closes the caveat
+about an `mcp_calcom` tenant needing an API key just to quote its hours.
+
+Still rejected, and worth restating: inferring hours from a `get_availability` sweep. A
+fully-booked Tuesday comes back empty and the bot would tell callers it's closed on Tuesdays.
+
+`GET /v2/schedules` (`cal-api-version: 2024-06-11`) remains the REST provider's source, same
+shape: `{name, timeZone, availability: [{days, startTime, endTime}], isDefault, overrides}`.
 
 ### Three things worth recording
 
@@ -415,10 +426,59 @@ and printing ✓ was one round trip short of knowing anything — this exact fai
 a booking attempt, where it surfaces as "could not reach the calendar", which points at the network
 instead of at the grant.
 
-### Still to do
+### Step 6 — done and live-verified
 
-- **Step 6** — re-run `python -m scripts.authorize_calcom --tenant hotel-mzv` now that the cache fix
-  is in. It will say plainly whether the new grant works. Then flip `booking.provider` to
-  `mcp_calcom` and verify a real availability query and a real booking. Everything else in this
-  phase works identically on the REST provider hotel-mzv is on today, so nothing is degraded while
-  this waits.
+Re-authorized, and the fresh grant works: `initialize` against `mcp.cal.com` returns 200.
+`hotel-mzv` is now `booking.provider: "mcp_calcom"`, deployed, and proven end to end:
+
+- **Opening hours over MCP** — "What time do you open?" → *"open daily from 7:00 AM to 10:00 PM"*,
+  now sourced from `get_default_schedule` rather than REST.
+- **Availability** — real slots at `+05:00`; cold 0.84s, warm 0.63s, both inside the §13 budget and
+  effectively tied with the REST provider.
+- **A real booking**, driven through `/chat` and pulled back from Cal.com's own `/v2/bookings`:
+  `uid hxHbVJdjuQurze`, `2026-08-18T13:00:00Z` = **18:00 Asia/Karachi**, exactly the 6pm slot
+  offered, 60 minutes, event type `6446177`, attendee `caller-923001234567@example.com`, metadata
+  `{tenant_id: hotel-mzv, service_slug: spa-treatment, channel: chat}` — identical in shape to the
+  REST-provider bookings sitting beside it. Its attendee timezone reads `Asia/Karachi`; every
+  earlier booking on this calendar reads `America/New_York`, which is the Step 7 change visible on
+  the calendar itself.
+
+That test booking is still on the calendar (2026-08-18 18:00) alongside earlier ones from previous
+sessions — cancel them in Cal.com whenever convenient.
+
+### Two bugs the switch exposed, both fixed
+
+**1. An import cycle that only a script could hit.** `scripts/authorize_calcom.py`'s new
+verification step crashed with `ImportError: cannot import name 'native_tools_for' from partially
+initialized module 'app.tools.registry'`. Two cycles existed:
+
+```
+app/tools/__init__.py -> registry -> action_tools -> app.flows -> app.flows.render
+  -> app.brain.events -> app/brain/__init__.py -> app.brain.graph
+  -> app.brain.nodes.reason -> app.tools.registry            (partial)
+... -> app.brain.runner -> app.flows.render                  (partial)
+```
+
+The root was `app/brain/__init__.py` eagerly importing the graph, so touching *any* leaf of
+`app.brain` built the whole thing — `app/flows/render.py` wants one dataclass out of
+`app.brain.events` and had no business compiling a graph to get it. Nothing imports
+`from app.brain import ...` at all, so those re-exports are now lazy (PEP 562 `__getattr__`),
+which breaks both cycles at the source. An initial attempt scattered function-local imports across
+four modules in `app.brain`; those were reverted once the root fix landed, because they'd have left
+comments claiming a cycle that no longer exists.
+
+Invisible for months because the app, every `app.main`-importing script, and the whole test suite
+resolve the package graph early enough that the loop is already closed.
+`tests/test_import_cycles.py` runs cold imports in a **subprocess** for exactly that reason —
+module state is process-global, so any earlier import in the same interpreter hides it.
+
+**2. A shape mismatch that failed silently.** After the provider flip, the admin panel reported
+"Connected, but Cal.com didn't return a schedule" — with nothing in the logs. REST returns a
+**list** of schedules; MCP's `get_default_schedule` returns a **single dict**, its envelope already
+stripped by `_call_tool`'s `_unwrap_envelope`. `_schedule_from_calcom` understood only the list, so
+it returned `None` — no exception, no log line, just a missing hours line. It now normalises all
+four wrappers (bare/enveloped × list/dict), covered by `TestScheduleShapes`.
+
+Worth noting the failure mode: this layer is deliberately built to degrade quietly so a calendar
+outage can't kill a turn, and the cost of that is that a mapping bug is also quiet. Only a live
+check surfaces it.

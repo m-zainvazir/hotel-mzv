@@ -449,18 +449,37 @@ def _parse_calcom_datetime(value: str) -> datetime:
 
 
 def _schedule_from_calcom(data: Any) -> AvailabilitySchedule | None:
-    """Map `GET /v2/schedules` onto the provider-neutral shape.
+    """Map a Cal.com schedule payload onto the provider-neutral shape.
 
-    Shape confirmed live (2026-08-17, `cal-api-version: 2024-06-11`):
-    `{"status": "success", "data": [{"id", "ownerId", "name", "timeZone",
-    "availability": [{"days": ["Monday", ...], "startTime": "07:00",
-    "endTime": "22:00"}], "isDefault": true, "overrides": []}]}`.
+    Serves BOTH Cal.com transports, which hand over the same fields in
+    different wrappers — confirmed live 2026-08-17 against this project's
+    account:
+
+    * REST `GET /v2/schedules` (`cal-api-version: 2024-06-11`) — a **list**,
+      after `_request` strips the `{"status", "data"}` envelope.
+    * MCP `get_default_schedule` — a **single dict**, because `_call_tool`'s
+      `_unwrap_envelope` strips the identical envelope around one schedule.
+
+    Normalising here rather than at each call site is what lets one mapper
+    serve both. Getting it wrong is quiet, not loud: an unhandled shape
+    returns None, the prompt simply omits the hours line, and nothing logs —
+    which is exactly how the MCP path shipped with `schedule: null` until a
+    live check caught it.
 
     `overrides` (one-off date exceptions) are deliberately ignored: they're
     "closed on the 25th", not opening hours, and `check_availability` already
     reflects them because Cal.com applies them to the slots it returns.
     """
-    schedules = data if isinstance(data, list) else (data or {}).get("data") or []
+    if isinstance(data, dict):
+        # Either the envelope survived, or this is one bare schedule.
+        inner = data.get("data", data)
+        schedules = inner if isinstance(inner, list) else [inner]
+    elif isinstance(data, list):
+        schedules = data
+    else:
+        return None
+
+    schedules = [s for s in schedules if isinstance(s, dict) and s.get("availability")]
     if not schedules:
         return None
 

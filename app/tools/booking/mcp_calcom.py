@@ -49,6 +49,7 @@ from app.tools.booking.base import (
     Slot,
     SlotUnavailableError,
 )
+from app.tools.booking.calcom import _schedule_from_calcom
 
 logger = logging.getLogger(__name__)
 
@@ -158,34 +159,31 @@ class McpBookingProvider(BookingProvider):
     # --- opening hours ---------------------------------------------------
 
     async def availability_schedule(self, tenant: TenantConfig) -> AvailabilitySchedule | None:
-        """Phase 9.4, and the one place this provider deliberately reaches
-        past MCP to the plain REST API.
+        """Phase 9.4: the account's own opening hours, over MCP.
 
-        Cal.com's hosted MCP server exposes booking tools; nothing in its
-        published tool list returns an availability *schedule*. The obvious
-        alternative — inferring opening hours from a `get_availability` sweep
-        — is actively wrong: a fully-booked Tuesday would come back empty and
-        the bot would tell callers it's closed on Tuesdays. Reporting no
-        hours at all is better than reporting false ones, so the fallback
-        chain is: REST `/v2/schedules` when this tenant has a resolvable API
-        key, otherwise None (and the prompt tells the model to quote
-        `check_availability` instead of hours).
+        `get_default_schedule` takes no arguments and returns byte-identical
+        JSON to REST's `GET /v2/schedules` single entry — confirmed live
+        2026-08-17 against this project's account, so `_schedule_from_calcom`
+        maps both without a second parser:
 
-        Consequence worth knowing: an `mcp_calcom` tenant with an OAuth grant
-        but no API key books fine and simply can't quote its opening hours.
-        Revisit if Cal.com's MCP server ever ships a schedule tool — see
-        `plans/phase9.4.md` Step 0.
+            {"status": "success", "data": {"id", "ownerId", "name",
+             "timeZone", "availability": [{"days": [...], "startTime",
+             "endTime"}], "isDefault", "overrides"}}
+
+        Reads the *default* schedule for the same reason the REST provider
+        does: resolving the event type's own `scheduleId` costs an extra
+        round trip for a value that has been the default on every account
+        this has run against.
+
+        Note what is NOT done here: inferring hours from a `get_availability`
+        sweep. That's the obvious fallback and it is actively wrong — a
+        fully-booked Tuesday comes back empty, and the bot would tell callers
+        it's closed on Tuesdays. Returning None (so the prompt says "check
+        availability" instead of quoting hours) beats confident fiction.
         """
-        from app.tools.booking.calcom import CalcomBookingProvider
-
-        try:
-            return await CalcomBookingProvider(store=self._store).availability_schedule(tenant)
-        except BookingError:
-            logger.info(
-                "no REST schedule available for mcp_calcom tenant=%s — hours will be omitted",
-                tenant.tenant_id,
-            )
-            return None
+        session = await self._session_for(tenant.tenant_id)
+        data = await _call_tool(tenant.tenant_id, session, "get_default_schedule", {})
+        return _schedule_from_calcom(data)
 
     # --- mutations ---------------------------------------------------------
 

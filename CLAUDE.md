@@ -970,13 +970,20 @@ working-looking controls for the one that had no effect. Now:
   `_calcom_tenants_declare_event_types` at load.
 - **Live-verified**: hotel-mzv answers "what time do you open?" with Cal.com's
   own `7:00 AM to 10:00 PM`, and returns real slots at `+05:00`.
-- **Still open**: `hotel-mzv` is still on REST `"calcom"`, not `mcp_calcom`. It
-  was authorized, but the grant came back dead — the token endpoint minted
-  tokens that `mcp.cal.com` and `api.cal.com` both rejected. That hunt turned
-  up the `set_tenant_secret` cache bug (see the gotcha below), which is fixed;
-  re-running `python -m scripts.authorize_calcom --tenant hotel-mzv` now
-  verifies the grant end to end instead of assuming it. Nothing is degraded
-  meanwhile: the REST provider works and Cal.com owns the hours either way.
+- **`hotel-mzv` is now on `mcp_calcom`**, live-verified: hours over
+  `get_default_schedule`, real slots, and a real booking pulled back from
+  Cal.com's own `/v2/bookings` matching the REST provider's shape exactly
+  (`uid hxHbVJdjuQurze`, 18:00 Asia/Karachi, event type 6446177). Getting
+  there took two attempts — the first grant came back dead (the token
+  endpoint minted tokens both `mcp.cal.com` and `api.cal.com` rejected),
+  which is what exposed the `set_tenant_secret` cache bug below.
+- **`mcp.cal.com` exposes 59 tools, not 4.** `session.list_tools()` (finally
+  runnable once a working grant existed) lists a full schedule family
+  (`get_default_schedule`, `get_schedules`, `create_schedule`, ...),
+  `get_busy_times`, `get_connected_calendars`, `confirm_booking`, and a large
+  org/team/routing surface. An earlier note in this phase claimed the server
+  had no schedule tool — that was inferred from Cal.com's docs, not from the
+  server, and it was wrong. **List the tools before assuming what's there.**
 
 ## Gotchas learned the hard way
 - **`/widget.js` must send `Cache-Control: no-cache`, never `immutable`.**
@@ -1190,6 +1197,27 @@ working-looking controls for the one that had no effect. Now:
   is dead everywhere else. Guarded by
   `test_tenant_secrets.py::test_a_write_invalidates_the_read_cache`, verified to fail
   without the fix.
+- **`app/brain/__init__.py`'s re-exports are lazy (PEP 562) and must stay that way.**
+  Importing them eagerly meant touching *any* leaf of `app.brain` compiled the whole
+  graph, which closed two import cycles: `app.tools` → registry → action_tools →
+  `app.flows` → `app.flows.render` → `app.brain.events` → `app.brain.graph` →
+  `app.brain.nodes.reason` → back into a half-initialized `app.tools.registry`, and the
+  same loop via `app.brain.runner` → `app.flows.render`. `app/flows/render.py` wants one
+  dataclass out of `app.brain.events`; it shouldn't need a compiled graph to get it.
+  **Nothing imports `from app.brain import ...`**, so the re-exports were pure cost.
+  Invisible for months because the app, every `app.main`-importing script and the whole
+  test suite resolve the graph early enough that the loop is already closed — it took
+  `scripts/authorize_calcom.py` (which legitimately imports only `app.tenancy.secrets`)
+  to surface it. `tests/test_import_cycles.py` guards this **from a subprocess**, since
+  module state is process-global and any earlier import in the same interpreter hides it.
+- **`_schedule_from_calcom` must handle four wrappers, and getting it wrong is silent.**
+  REST `GET /v2/schedules` returns a **list**; MCP `get_default_schedule` returns a
+  **single dict** (its `{"status","data"}` envelope already stripped by `_call_tool`'s
+  `_unwrap_envelope`). One mapper serves both. When it shipped understanding only the
+  list, the admin panel said "Cal.com didn't return a schedule" and **nothing logged** —
+  this layer is deliberately built to degrade quietly so a calendar outage can't kill a
+  turn, and the price is that a mapping bug degrades just as quietly. Only a live check
+  finds this class of bug.
 - **A stored Cal.com grant proves nothing until a real tool call goes through it.**
   `scripts/authorize_calcom.py::_verify_grant` deliberately exercises the *headless*
   refresh path (not the code exchange's own access token — the exchange looked perfect in
