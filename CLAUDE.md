@@ -720,9 +720,20 @@ file, or crawl a URL) that `search_knowledge` retrieves from mid-turn.
   branch including malformed-file error paths, conditional binding on both
   channels, and — the one the plan calls out by name — that bot A can never
   retrieve bot B's chunks, proven at both the store layer and through the
-  tool directly. **Not yet done, and honestly still owed**: a real
-  `/admin` click-through in a browser (same Chrome-extension gap Part B
-  flagged), a live embedding call, and a real crawl against a live URL.
+  tool directly.
+- **The RAG pipeline is live-verified end to end (confirmed 2026-08-23), which
+  supersedes an earlier note here that a live embedding call was "still owed".**
+  `test-clinic` carries two real documents ingested through `/admin` on
+  2026-08-03 — one pasted text (1 chunk) and one uploaded `.txt` (8 chunks) —
+  both `status: "ready"`, `error: null`, and their chunks hold genuine
+  **768-dimensional** Gemini embeddings, so `app/rag/embeddings.py`'s
+  request/response shape is confirmed against the real API rather than assumed.
+  Retrieval is proven too: a production chat turn asking "is parking free?"
+  came back with the ingested text's own answer ("free for the first 90 minutes
+  at the west garage… $4 per hour"), preceded by an `acknowledgement` event —
+  i.e. `is_slow_tool` correctly treats `search_knowledge` as slow. **Still
+  unproven, and the only gap left in Part C: a real crawl against a live URL**
+  (`app/rag/crawl.py`'s SSRF guards have never met a real redirect).
 
 **`0011_knowledge.sql` is now live-verified (2026-08-02)** — applied in the
 same pass as `0010_lifecycle.sql` above, against the real Supabase project.
