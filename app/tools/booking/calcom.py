@@ -52,6 +52,16 @@ _SCHEDULES_API_VERSION = "2024-06-11"
 
 _SLOT_UNAVAILABLE_MARKERS = ("already booked", "no longer available", "slot", "conflict")
 
+#: Cal.com rejects an attendee whose email DOMAIN has no live MX record —
+#: it checks deliverability, not syntax. Worth its own branch because the
+#: generic "rejected that request" gave an operator nothing to act on while
+#: every single booking failed: the fix is a config value, not a retry.
+_UNDELIVERABLE_EMAIL_MARKERS = ("cannot_receive_mail", "cannot receive mail")
+_UNDELIVERABLE_EMAIL_MESSAGE = (
+    "the calendar refused the attendee email — set BOOKING_PLACEHOLDER_EMAIL "
+    "to a real inbox (its domain must accept mail)"
+)
+
 
 class CalcomBookingProvider(BookingProvider):
     name = "calcom"
@@ -425,6 +435,9 @@ class CalcomBookingProvider(BookingProvider):
         if response.status_code == 404:
             logger.error("calcom 404 (bad event type?): %s", detail)
             raise BookingError("the calendar could not find that event type")
+        if any(marker in detail.lower() for marker in _UNDELIVERABLE_EMAIL_MARKERS):
+            logger.error("calcom rejected the attendee email: %s", detail)
+            raise BookingError(_UNDELIVERABLE_EMAIL_MESSAGE)
         if response.status_code == 409 or any(
             marker in detail.lower() for marker in _SLOT_UNAVAILABLE_MARKERS
         ):
@@ -504,7 +517,14 @@ def _schedule_from_calcom(data: Any) -> AvailabilitySchedule | None:
 
 
 def _placeholder_email(phone: str, settings: Settings) -> str:
-    """Deterministic so the same caller is always the same Cal.com attendee."""
+    """The attendee address for a caller who gave no email.
+
+    A configured real inbox wins: Cal.com validates that the attendee's
+    domain can actually receive mail, so a synthesized address only works
+    when its domain has a live MX record. See `booking_placeholder_email`.
+    """
+    if settings.booking_placeholder_email:
+        return settings.booking_placeholder_email
     digits = "".join(ch for ch in phone if ch.isdigit())
     return f"caller-{digits}@{settings.booking_placeholder_email_domain}"
 

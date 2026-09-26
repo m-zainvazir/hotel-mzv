@@ -16,7 +16,13 @@ from langchain_core.tools import tool
 
 from app.tools.booking.base import BookingError, BookingRequest, SlotUnavailableError
 from app.tools.context import channel_from_config, tenant_from_config
-from app.tools.formatting import format_slots, normalize_phone, parse_iso, speakable_datetime
+from app.tools.formatting import (
+    dial_code_for,
+    format_slots,
+    normalize_phone,
+    parse_iso,
+    speakable_datetime,
+)
 from app.tools.providers import get_booking_provider
 
 logger = logging.getLogger(__name__)
@@ -108,6 +114,16 @@ async def check_availability(
         ), {}
 
     keep = tenant.booking.max_slots_returned
+    # What the calendar really holds, before narrowing to the handful actually
+    # read out. Reported below, because the narrowed list otherwise reads as
+    # the whole truth: a caller told "the earliest we have is 12:30, 1, or
+    # 1:30" hears "and nothing after that" — on a calendar open until 10pm
+    # with sixteen free slots. Reported by an operator comparing the bot
+    # against Cal.com and concluding availability was broken; it wasn't, the
+    # sentence was.
+    total_free = len(slots)
+    latest_free = max(slots, key=lambda s: s.start)
+
     if preferred is not None:
         # Nearest to what they asked for, in either direction; then show them
         # in chronological order so the caller hears "6, 6:30, 7" naturally.
@@ -118,10 +134,19 @@ async def check_availability(
         slots = slots[:keep]
         header = "next available"
 
+    more = ""
+    if total_free > len(slots):
+        more = (
+            f"\n({total_free - len(slots)} more free after these, through "
+            f"{speakable_datetime(latest_free.start, tenant.tz)}. These are a SAMPLE, "
+            "not the only times — if none suit, offer another time or day rather than "
+            "implying the calendar is full.)"
+        )
+
     text = (
         f"{matched.name} ({matched.duration_minutes} min"
         + (f", ${matched.price_usd:.0f}" if matched.price_usd else "")
-        + f") — {header}:\n{format_slots(slots, tenant.tz)}\n"
+        + f") — {header}:\n{format_slots(slots, tenant.tz)}{more}\n"
         f"Offer these to the caller, then call book_job with the chosen slot_start_iso."
     )
     # A widget can render these as quick-reply chips (Phase 5) — the model
@@ -172,7 +197,7 @@ async def book_job(
     if start is None:
         return f"ERROR: could not parse slot_start_iso={slot_start_iso!r}. Use ISO-8601."
 
-    phone = normalize_phone(customer_phone)
+    phone = normalize_phone(customer_phone, dial_code_for(tenant))
     if phone is None:
         return "ERROR: customer_phone is not a usable phone number. Ask the caller to repeat it."
     if not customer_name.strip():

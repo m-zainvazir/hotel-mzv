@@ -10,7 +10,7 @@ from langchain_core.tools import tool
 from app.db.factory import get_store
 from app.db.supabase_store import SupabaseStoreError
 from app.tools.context import channel_from_config, tenant_from_config
-from app.tools.formatting import normalize_phone, speakable_datetime
+from app.tools.formatting import dial_code_for, normalize_phone, speakable_datetime
 from app.tools.messaging.base import MessagingError
 from app.tools.providers import get_escalator, get_notifier
 
@@ -47,7 +47,9 @@ async def send_confirmation(
     if job is None:
         return f"ERROR: no job {job_id!r} for this business. Check the job_id from book_job."
 
-    destination = normalize_phone(to_phone) if to_phone else job.customer_phone
+    destination = (
+        normalize_phone(to_phone, dial_code_for(tenant)) if to_phone else job.customer_phone
+    )
     if destination is None:
         return "ERROR: to_phone is not a usable phone number."
 
@@ -100,7 +102,9 @@ async def escalate(
     tenant = tenant_from_config(config)
     channel = channel_from_config(config)
 
-    normalized = normalize_phone(callback_number) if callback_number else None
+    normalized = (
+        normalize_phone(callback_number, dial_code_for(tenant)) if callback_number else None
+    )
     escalator = get_escalator(tenant, channel)
     escalation = await escalator.escalate(
         tenant,

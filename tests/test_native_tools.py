@@ -116,7 +116,9 @@ async def test_book_job_creates_a_job(hotel):
     assert result.startswith("BOOKED job_id=")
     jobs = get_store().list_jobs(hotel.tenant_id)
     assert len(jobs) == 1
-    assert jobs[0].customer_phone == "+15551112222"  # normalised on the way in
+    # Normalised on the way in, using the TENANT's country (Asia/Karachi
+    # -> +92), not a hardcoded +1.
+    assert jobs[0].customer_phone == "+925551112222"
     assert jobs[0].channel == "chat"
 
 
@@ -192,7 +194,7 @@ async def test_send_confirmation_texts_the_customer(hotel):
         {"job_id": job_id}, config=tool_config(hotel.tenant_id)
     )
 
-    assert result.startswith("SENT confirmation to +15551112222")
+    assert result.startswith("SENT confirmation to +925551112222")
     messages = get_store().list_messages(hotel.tenant_id)
     assert len(messages) == 1
     assert "Hotel_MZV" in messages[0].body
@@ -310,18 +312,41 @@ async def test_tools_refuse_to_run_without_a_tenant():
 
 
 @pytest.mark.parametrize(
-    ("raw", "expected"),
+    ("raw", "dial_code", "expected"),
     [
-        ("(555) 111-2222", "+15551112222"),
-        ("555.111.2222", "+15551112222"),
-        ("+44 20 7946 0000", "+442079460000"),
-        ("15551112222", "+15551112222"),
-        ("123", None),
-        ("", None),
+        # A national number needs the business's own country — this used to
+        # be hardcoded to +1, which stored a Karachi caller's 0333 333333 as
+        # +10333333333: a number nobody can ring back.
+        ("0333 3333333", "+92", "+923333333333"),
+        ("03001234567", "+92", "+923001234567"),
+        ("3331234567", "+92", "+923331234567"),
+        ("(555) 111-2222", "+1", "+15551112222"),
+        ("555.111.2222", "+1", "+15551112222"),
+        # Already international: the code is never applied twice.
+        ("+44 20 7946 0000", "+92", "+442079460000"),
+        ("923331234567", "+92", "+923331234567"),
+        ("15551112222", None, "+15551112222"),
+        # No country known: refuse rather than invent one. `+0…` is not a
+        # valid E.164 number and `+5551112222` claims country code 555.
+        ("0333 3333333", None, None),
+        ("5551112222", None, None),
+        ("123", "+92", None),
+        ("", "+92", None),
     ],
 )
-def test_phone_normalisation(raw, expected):
-    assert normalize_phone(raw) == expected
+def test_phone_normalisation(raw, dial_code, expected):
+    assert normalize_phone(raw, dial_code) == expected
+
+
+def test_the_dial_code_comes_from_the_tenant_not_a_hardcoded_country(hotel):
+    """`dial_code_for` falls back to the tenant's timezone, so a bot that
+    never sets the field still gets its own country."""
+    from app.tools.formatting import dial_code_for
+
+    assert hotel.timezone == "Asia/Karachi"
+    assert dial_code_for(hotel) == "+92"
+    assert dial_code_for(hotel.model_copy(update={"dial_code": "+971"})) == "+971"
+    assert dial_code_for(hotel.model_copy(update={"timezone": "America/New_York"})) == "+1"
 
 
 def test_naive_iso_is_read_in_the_tenants_timezone(hotel):
@@ -350,3 +375,46 @@ def test_iso_wall_clock_is_always_read_as_local_never_shifting_the_day(hotel, va
     assert (parsed.year, parsed.month, parsed.day) == (2026, 8, 1)
     assert parsed.hour == 0
     assert parsed.tzinfo is hotel.tz
+
+
+async def test_the_slot_list_says_it_is_a_sample_when_more_are_free(hotel, override_tenant):
+    """Reported live: Cal.com showed a calendar open 7am-10pm with sixteen
+    free slots, the bot said "the earliest we have is 12:30, 1, or 1:30", and
+    the operator reasonably concluded availability was broken. It wasn't —
+    `max_slots_returned` is 3 and the sentence didn't say so."""
+    from app.tools.booking.stub import StubBookingProvider
+    from app.tools.providers import set_booking_provider
+
+    override_tenant(hotel)
+    set_booking_provider(hotel.tenant_id, StubBookingProvider())
+
+    text = await check_availability.ainvoke(
+        {"service": "room-reservation"}, config=tool_config(hotel.tenant_id)
+    )
+
+    assert "SAMPLE" in text, text
+    assert "more free after these" in text
+    assert "through" in text
+
+
+async def test_no_sample_note_when_the_listed_slots_are_all_there_is(hotel, override_tenant):
+    """The opposite case must stay silent: claiming more exists when it
+    doesn't is the same lie in the other direction."""
+    from app.tools.booking.base import Slot
+    from app.tools.booking.stub import StubBookingProvider
+    from app.tools.providers import set_booking_provider
+
+    class OneSlotProvider(StubBookingProvider):
+        async def check_availability(self, tenant, service, *, earliest=None, limit=10):
+            start = (earliest or datetime.now(tenant.tz)) + timedelta(hours=3)
+            return [Slot(start=start, end=start + timedelta(minutes=30))]
+
+    override_tenant(hotel)
+    set_booking_provider(hotel.tenant_id, OneSlotProvider())
+
+    text = await check_availability.ainvoke(
+        {"service": "room-reservation"}, config=tool_config(hotel.tenant_id)
+    )
+
+    assert "SAMPLE" not in text
+    assert "more free after these" not in text

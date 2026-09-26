@@ -94,7 +94,8 @@ async def test_books_a_job_end_to_end(scripted, hotel):
     assert len(jobs) == 1
     job = jobs[0]
     assert job.customer_name == "Dana Reyes"
-    assert job.customer_phone == "+15551112222"
+    # The tenant's own country (Asia/Karachi -> +92), not a hardcoded +1.
+    assert job.customer_phone == "+925551112222"
     assert job.service_slug == "room-reservation"
     assert hotel.is_open_at(job.scheduled_start)
 
@@ -103,7 +104,7 @@ async def test_books_a_job_end_to_end(scripted, hotel):
         m for m in get_store().list_messages(hotel.tenant_id) if m.kind == "confirmation"
     ]
     assert len(confirmations) == 1
-    assert confirmations[0].to == "+15551112222"
+    assert confirmations[0].to == "+925551112222"
 
     final = next(e for e in turn2 if e.type == "final")
     assert "all set" in final.text

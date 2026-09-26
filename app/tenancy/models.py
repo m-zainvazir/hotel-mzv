@@ -461,6 +461,13 @@ class TenantConfig(BaseModel):
     #: separate setting that only controls how the dashboard displays what
     #: was booked (see the CLAUDE.md gotcha). The admin panel warns on drift.
     timezone: str = "Asia/Karachi"
+    #: The business's country dialling code, used to turn a caller's national
+    #: number (`0333 3333333`) into E.164. Unset falls back to a small
+    #: timezone -> dial-code table (`app/tools/formatting.py::dial_code_for`)
+    #: so a tenant that never sets it still gets its own country rather than
+    #: a hardcoded `+1` — which is what silently stored a Karachi caller as
+    #: `+10333333333`, a number nobody can ring back.
+    dial_code: str | None = Field(default=None, pattern=r"^\+\d{1,4}$")
     #: "archived" (Phase 9 Part B) is a soft-delete: `resolve_tenant_id`
     #: refuses to serve one on any channel, but every row survives until an
     #: explicit, separately-confirmed purge. Not the same as "paused" —
