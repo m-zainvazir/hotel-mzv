@@ -315,6 +315,50 @@ class TestTestLinkRoute:
         assert body["url"].startswith("https://example.test/test/")
         assert body["expires_at"] > 0
 
+    def test_a_panel_opened_on_localhost_gets_a_localhost_link(self, admin_client, monkeypatch):
+        """PUBLIC_BASE_URL names the *deployed* origin. Using it for a panel
+        reached over loopback handed a dev box a production URL carrying a
+        locally-signed token — dead at the far end even when the deployment
+        is up, since the two processes sign with different secrets."""
+        from fastapi.testclient import TestClient
+
+        from app.main import app
+
+        monkeypatch.setenv("PUBLIC_BASE_URL", "https://example.test")
+        reset_settings_cache()
+        try:
+            with TestClient(app, base_url="http://127.0.0.1:8000") as local:
+                response = local.post(
+                    "/admin/api/tenants/hotel-mzv/test-link",
+                    json={"mode": "voice"},
+                    headers=_bearer(),
+                )
+        finally:
+            reset_settings_cache()
+
+        assert response.status_code == 200
+        assert response.json()["url"].startswith("http://127.0.0.1:8000/test/")
+
+    def test_a_localhost_panel_works_with_no_public_base_url_at_all(
+        self, admin_client, monkeypatch
+    ):
+        """...and it no longer 422s for want of a setting that only matters
+        to links you intend to send someone else."""
+        from fastapi.testclient import TestClient
+
+        from app.main import app
+
+        monkeypatch.delenv("PUBLIC_BASE_URL", raising=False)
+        reset_settings_cache()
+        try:
+            with TestClient(app, base_url="http://localhost:8000") as local:
+                response = local.post("/admin/api/tenants/hotel-mzv/test-link", headers=_bearer())
+        finally:
+            reset_settings_cache()
+
+        assert response.status_code == 200
+        assert response.json()["url"].startswith("http://localhost:8000/test/")
+
     def test_unknown_tenant_is_404(self, admin_client, monkeypatch):
         monkeypatch.setenv("PUBLIC_BASE_URL", "https://example.test")
         reset_settings_cache()

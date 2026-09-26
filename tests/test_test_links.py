@@ -145,11 +145,14 @@ class TestTestAgentPage:
         response = client.get(f"/test/{token}")
         assert response.status_code == 404
 
-    def test_a_voice_mode_token_is_refused_until_the_voice_tester_ships(self, client, hotel):
+    def test_a_voice_mode_token_now_serves_the_voice_tester(self, client, hotel):
+        """Was "refused until the voice tester ships" from 9.1 until 9.3
+        shipped it. The token shape never changed — that was the point of
+        minting `mode` a phase early."""
         token = mint_test_token(hotel.tenant_id, mode="voice")
         response = client.get(f"/test/{token}")
-        assert response.status_code == 404
-        assert "9.3" in response.json()["detail"]
+        assert response.status_code == 200
+        assert "/voice/live" in response.text
 
     def test_unknown_tenant_is_404(self, client):
         # A token was minted once for a real tenant, then that tenant

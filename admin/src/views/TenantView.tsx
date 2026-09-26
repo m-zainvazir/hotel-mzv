@@ -85,9 +85,11 @@ export function TenantView({
 
 function HeaderActions({ tenantId, onDeployed }: { tenantId: string; onDeployed?: () => void }) {
   // On every tab (it lives in the shared header, not a per-tab view) and
-  // greyed per channel flag — 9.3's voice mode appears here with no
-  // further UI work once it ships, by adding a second button/mode toggle.
+  // greyed per channel flag — 9.3 added the voice button beside the chat
+  // one, exactly as this comment anticipated: same signed link, same draft
+  // variant, a different `mode` claim and a different page behind it.
   const [chatEnabled, setChatEnabled] = useState(true);
+  const [voiceEnabled, setVoiceEnabled] = useState(true);
   const [hasDraft, setHasDraft] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -96,27 +98,34 @@ function HeaderActions({ tenantId, onDeployed }: { tenantId: string; onDeployed?
   function refresh(): void {
     getTenantConfig(tenantId)
       .then((detail) => {
-        const channels = detail.config.channels as { chat?: { enabled?: boolean } } | undefined;
+        const channels = detail.config.channels as
+          | { chat?: { enabled?: boolean }; voice?: { enabled?: boolean } }
+          | undefined;
         setChatEnabled(channels?.chat?.enabled !== false);
+        setVoiceEnabled(channels?.voice?.enabled !== false);
         setHasDraft(detail.has_draft);
       })
-      .catch(() => setChatEnabled(true));
+      .catch(() => {
+        setChatEnabled(true);
+        setVoiceEnabled(true);
+      });
   }
 
   useEffect(() => {
     setChatEnabled(true);
+    setVoiceEnabled(true);
     setHasDraft(false);
     refresh();
   }, [tenantId]);
 
-  async function openTest(): Promise<void> {
+  async function openTest(mode: "chat" | "voice"): Promise<void> {
     setBusy(true);
     setError(null);
     try {
       // DRAFT, not live. "Test Agent" means "try what I'm working on" — the
       // published bot is what the share link is for. When there's no draft
       // the server falls back to live, so this is always "current state".
-      const { url } = await createTestLink(tenantId, "chat", "draft");
+      const { url } = await createTestLink(tenantId, mode, "draft");
       window.open(url, "_blank", "noopener");
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "could not create a test link");
@@ -130,7 +139,7 @@ function HeaderActions({ tenantId, onDeployed }: { tenantId: string; onDeployed?
       {error && <span class="admin-field-error">{error}</span>}
       <button
         class="admin-btn admin-btn--secondary"
-        onClick={openTest}
+        onClick={() => openTest("chat")}
         disabled={busy || !chatEnabled}
         title={
           chatEnabled
@@ -139,6 +148,18 @@ function HeaderActions({ tenantId, onDeployed }: { tenantId: string; onDeployed?
         }
       >
         {busy ? "Opening…" : "✎ Test Agent"}
+      </button>
+      <button
+        class="admin-btn admin-btn--secondary"
+        onClick={() => openTest("voice")}
+        disabled={busy || !voiceEnabled}
+        title={
+          voiceEnabled
+            ? "Talk to your unpublished draft in the browser, and measure its latency"
+            : "voice channel disabled"
+        }
+      >
+        {busy ? "Opening…" : "🎙 Test Voice"}
       </button>
       <button
         class="admin-btn"

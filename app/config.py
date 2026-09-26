@@ -118,14 +118,27 @@ class Settings(BaseSettings):
     #: hours change on the order of years, and any config edit that could
     #: affect the answer invalidates the entry immediately regardless.
     booking_schedule_cache_seconds: float = 900.0
-    #: Cal.com requires an attendee email; phone callers rarely give one. When
-    #: none is offered we synthesize `caller-<digits>@<this domain>` —
-    #: deterministic (same caller twice = same Cal.com attendee). Must be a
-    #: domain with real MX records: Cal.com actively validates attendee email
-    #: deliverability (verified live — a made-up domain gets a flat 400,
-    #: "This email address cannot receive mail"), so `example.com` (IANA's
-    #: reserved, always-resolvable documentation domain) is the safe default
-    #: rather than a made-up one.
+    #: Cal.com requires an attendee email; phone callers rarely give one.
+    #:
+    #: **Set this to a real inbox you own.** It is used verbatim as the
+    #: attendee whenever a caller gives no email of their own, so the
+    #: confirmation lands with the business rather than nowhere. Leaving it
+    #: unset falls back to the synthesized
+    #: `caller-<digits>@booking_placeholder_email_domain` below, which needs
+    #: a domain that genuinely accepts mail.
+    booking_placeholder_email: str | None = None
+    #: The synthesized fallback's domain — deterministic, so the same caller
+    #: is always the same Cal.com attendee.
+    #:
+    #: **`example.com` does not work and never really did.** It was chosen
+    #: for being "always resolvable", which is true of its A record and
+    #: false of its mail: it publishes a **null MX** (RFC 7505, `MX 0 "."` —
+    #: "this domain accepts no mail"). Cal.com checks MX and 400s with
+    #: `email_domain_cannot_receive_mail`, so every booking without a real
+    #: attendee email failed. Kept as the default only so the failure stays
+    #: loud and named rather than silently booking into a black hole — set
+    #: `booking_placeholder_email` above, or point this at a catch-all
+    #: domain whose MX really resolves.
     booking_placeholder_email_domain: str = "example.com"
 
     # --- booking: Cal.com over MCP (Phase 9 Part A) -------------------------
@@ -343,6 +356,76 @@ class Settings(BaseSettings):
     #: existed. `app/db/store.py::KnowledgeStore` is the seam a future
     #: Qdrant/Pinecone implementation would slot into.
     knowledge_source: Literal["supabase"] = "supabase"
+
+    # --- voice tester relay (Phase 9.3) --------------------------------------
+    #: Gates the `/voice/live` WebSocket entirely (a 404-shaped refusal when
+    #: off), on top of the per-tenant `channels.voice.enabled` toggle. On by
+    #: default, unlike `knowledge_enabled`: this route costs nothing until
+    #: someone actually opens a socket, and it self-refuses with a clear
+    #: message when no STT key is configured — so defaulting it off would
+    #: only add a second thing to remember.
+    voice_live_enabled: bool = True
+    #: Which provider `app/voice/providers.py` builds. "fake" is the scripted
+    #: pair every offline test drives (`app/voice/stt/fake.py`), and it is the
+    #: default precisely so a box with no Deepgram key still gets a working
+    #: tester to click through — silent audio and canned transcripts, but the
+    #: whole state machine, the metrics and the brain are real.
+    voice_stt_provider: Literal["fake", "deepgram"] = "fake"
+    voice_tts_provider: Literal["fake", "cartesia"] = "fake"
+    deepgram_api_base: str = "wss://api.deepgram.com/v1/listen"
+    #: Deepgram's streaming model. nova-3 is current at writing; a wrong value
+    #: fails the socket handshake loudly, never silently.
+    deepgram_model: str = "nova-3"
+    deepgram_language: str = "en"
+    #: Silence (ms) after which Deepgram marks a result `speech_final` — the
+    #: signal that ends a turn on an open mic, so nobody has to press send.
+    #: Too low and it cuts people off mid-thought; too high and the bot feels
+    #: slow to answer. 700ms is roughly a comfortable breath.
+    deepgram_endpointing_ms: int = 700
+    #: What an endpoint *means*. "instant" sends the moment the provider says
+    #: the speaker stopped — snappy, and it splits anyone who pauses to think
+    #: ("I want to…" / "…book a room" become two questions, and the bot
+    #: answers the fragment). "continuation" treats an endpoint as maybe-done:
+    #: it waits `voice_continuation_pause_seconds` and keeps accumulating if
+    #: more speech arrives, so a mid-sentence pause continues the sentence
+    #: instead of starting a new one. Continuation is the default because a
+    #: fragment answered confidently is worse than an answer a beat late.
+    voice_utterance_mode: Literal["instant", "continuation"] = "continuation"
+    #: How long continuation mode waits after an endpoint before deciding the
+    #: sentence really is finished. Long enough to draw breath mid-thought,
+    #: short enough not to feel like the bot has gone to sleep.
+    voice_continuation_pause_seconds: float = 1.5
+    #: Backstop for a speaker who trails off without a clean endpoint:
+    #: Deepgram then sends a standalone `UtteranceEnd`. Their API floors this
+    #: at 1000ms and it requires `interim_results=true`.
+    deepgram_utterance_end_ms: int = 1200
+    #: Spend caps (plans/phase9.3.md, "Cost"). Per-minute metered billing
+    #: behind a URL is a spend hole, so these ship with the route rather than
+    #: after it. The server closes with a `closing` message naming the reason,
+    #: never by going silent.
+    voice_max_session_seconds: float = 1800.0
+    voice_max_turns_per_session: int = 100
+    voice_idle_timeout_seconds: float = 300.0
+    #: Per client IP, its own bucket (the `test-session-ip` precedent — an
+    #: operator's tester must not eat real visitor traffic's allowance).
+    voice_sockets_per_minute: int = 10
+    #: How long an accepted-but-unauthenticated socket may live before it is
+    #: closed. The token arrives as the first frame rather than in the URL
+    #: (see plans/phase9.3.md D6): uvicorn's access logger writes the full
+    #: path *with query string* for every WebSocket connect, so a `?token=`
+    #: would be copied into production logs on every connection. The cost of
+    #: moving it is this window, bounded by `voice_sockets_per_minute`.
+    voice_auth_timeout_seconds: float = 10.0
+    #: How long to wait after `end_utterance` for the STT provider's final
+    #: transcript before giving up on the turn. Generous: a cut-off final is
+    #: worse than a slow one, and this only ever runs after the speaker has
+    #: already stopped talking.
+    voice_stt_final_timeout_seconds: float = 5.0
+    #: Ceiling on one utterance's audio, independent of the session cap — a
+    #: stuck client holding the button forever must not stream unbounded
+    #: bytes into a metered STT socket. 16kHz mono PCM16 is 32KB/s, so the
+    #: default is ~2 minutes of speech.
+    voice_max_utterance_bytes: int = 4 * 1024 * 1024
 
     # --- observability: LangSmith (Phase 7 Step 7) --------------------------
     #: These three were always in .env.example, but were never real Settings

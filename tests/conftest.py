@@ -41,6 +41,7 @@ from app.tools.booking.schedule import clear_schedule_cache
 from app.tools.booking.stub import StubBookingProvider
 from app.tools.http_client import reset_shared_clients
 from app.tools.providers import reset_provider_overrides, set_booking_provider
+from app.voice.providers import reset_voice_overrides
 
 
 class ScriptedChatModel(BaseChatModel):
@@ -244,6 +245,7 @@ def isolated_runtime():
     reset_calcom_mcp_sessions()
     clear_schedule_cache()
     reset_rate_limits()
+    reset_voice_overrides()
     seed_acknowledgements(1234)
     yield
     reset_settings_cache()
@@ -253,6 +255,7 @@ def isolated_runtime():
     set_llm_override(None)
     reset_provider_overrides()
     reset_rate_limits()
+    reset_voice_overrides()
     reset_shared_clients()
     clear_jwt_cache()
     clear_secret_cache()

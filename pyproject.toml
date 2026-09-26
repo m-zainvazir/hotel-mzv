@@ -65,6 +65,14 @@ mcp = ["langchain-mcp-adapters>=0.3", "mcp<2.0"]
 # "raw httpx, no SDKs" precedent (plan §10 amendment) — so this extra is
 # narrowly about file parsing, not the RAG pipeline as a whole.
 rag = ["pypdf>=5.0", "python-docx>=1.1"]
+# Phase 9.3 — the voice tester's Deepgram STT leg needs a WebSocket *client*
+# (audio up while interim results come down; TTS gets away with plain httpx).
+# `websockets` already arrives transitively with uvicorn[standard], which is
+# exactly why it's declared here rather than relied on: a transitive dependency
+# that disappears in some future uvicorn release would otherwise break this at
+# runtime on a box where it had always worked. Imported lazily either way
+# (app/voice/stt/deepgram.py), so a missing install costs voice, never the app.
+voice = ["websockets>=13"]
 # Durable conversation memory (Phase 4 Step 7). Optional and self-degrading:
 # app/brain/graph.py falls back to InMemorySaver with a WARNING if this
 # isn't installed, so a blocked compiled DLL (see the uuid_utils gotcha

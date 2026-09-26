@@ -996,7 +996,247 @@ working-looking controls for the one that had no effect. Now:
   had no schedule tool — that was inferred from Cal.com's docs, not from the
   server, and it was wrong. **List the tools before assuming what's there.**
 
+**Phase 9.3 (voice tester — browser mic → our own STT/LLM/TTS relay) is
+code-complete, offline-tested and smoke-verified against a real running
+server. Not deployed; never opened in a real browser.** See
+`plans/phase9.3.md`. An operator now gets a **Test Voice** button beside Test
+Agent in `/admin`; `mode: "voice"` test links, minted-and-rejected since 9.1,
+work. New package `app/voice/` (protocol, audio, `stt/`, `tts/`, providers,
+session) plus one route, `app/channels/voice_live.py`. 65 new tests, suite
+1064 → 1129.
+
+- **The server is a byte relay, not a media processor.** Raw `linear16`
+  end to end — 16kHz in (Deepgram's format), 24kHz out (Cartesia's) — so
+  `infra/Dockerfile` gained no ffmpeg/apt layer. Any resampling is the
+  browser's, in an AudioWorklet.
+- **Binary frames are audio, text frames are control** (`app/voice/protocol.py`
+  is the only definition, shared by both ends). Every server message carries
+  `turn`, and `state` is always sent *before* a turn's first audio frame:
+  binary frames have no turn of their own and inherit the last one, which is
+  what lets a client discard audio from a turn the user already cancelled.
+- **Auth is the first frame, not `?token=`, and that was a live finding.**
+  A browser can't set an `Authorization` header on a WebSocket, so the query
+  string is the obvious answer — but uvicorn's access logger writes a
+  socket's full path **with query string** (`get_path_with_query_string`),
+  and `app/logging_config.py` propagates `uvicorn.access` into the app's own
+  structured handler. A `?token=` would be copied into production logs on
+  every connect. **The same check found a pre-existing leak: `/test/{token}`
+  puts the token in the *path*, which has been logged at INFO since Phase 7**
+  — `app/middleware.py::redacted_path` now rewrites it to `/test/<redacted>`.
+  `/bot/{widget_key}` is deliberately untouched: a widget key is a public
+  identifier a client pastes into their own HTML, not a secret.
+- **The fake providers are the default, not test scaffolding.**
+  `VOICE_STT_PROVIDER`/`VOICE_TTS_PROVIDER` default to `"fake"`, so a box
+  with no Deepgram key still gets a tester with the real state machine, the
+  real brain and real latency numbers — canned transcripts, silence of the
+  right length. That is what let every step except the vendor adapters be
+  verified while the phase's stated blocker (nobody has a Deepgram key) is
+  still open. A provider *named* without its key fails the socket loudly
+  rather than degrading to silence — an operator would read silence as the
+  bot being broken.
+- **The measurement is the deliverable, and it misses the §13 budget: p50
+  1107ms / p95 2062ms first-audio, over three live turns.** Per the phase's
+  own acceptance criterion that's a pass — the number is measured and
+  explainable — and the explanation is the useful part: `first_audio −
+  first_token` was 46/56/59ms, so **the relay costs ~50ms and the budget is
+  spent almost entirely on the model's time-to-first-token** (1.0–2.0s,
+  Gemini's public API, from Karachi, with the full system prompt). Running
+  from the deployed region and a faster model are the levers; a real TTS leg
+  will *add* to this. A cold first turn measured 17.8s — an MCP connect
+  failure to an unreachable configured server plus the cold Cal.com
+  schedule/OAuth path, neither of them the relay. Don't read a first-turn
+  number as representative.
+- **Spend caps shipped with the route, not after it** (`VOICE_MAX_SESSION_SECONDS`,
+  `VOICE_MAX_TURNS_PER_SESSION`, `VOICE_IDLE_TIMEOUT_SECONDS`,
+  `VOICE_SOCKETS_PER_MINUTE`, `VOICE_MAX_UTTERANCE_BYTES`). A metered
+  per-minute endpoint behind a URL is the same spend hole `plans/phase10.md`
+  item 13 flags for the avatar. The STT socket opens per *utterance* and
+  closes at end of turn, so an idle connected tab bills nothing. Every cap
+  closes with a `closing` message naming the reason — a session that goes
+  silent at its limit is indistinguishable from a crash.
+- **Nothing is persisted, and that's a decision, not an omission**
+  (`plans/phase9.3.md` D7). Conversation memory already works via the
+  checkpointer (thread id `voice:<uuid4>`); `chat_sessions`/`chat_messages`
+  are the widget's and need a handshake this surface doesn't have; writing to
+  `calls` would inflate every tenant's Phase 8 analytics with operator tests.
+  A `voice_sessions` table earns its migration when voice stops being a
+  tester — and should mirror `chat_sessions`, not `calls`.
+- **Barge-in is scoped precisely**: cancelling a turn in flight is in (the
+  `cancel` frame, plus taking the mic, both stop audio); *VAD-driven*
+  barge-in is out. Push-to-talk makes "I want the floor" an explicit gesture,
+  and the server can't tell a VAD-triggered cancel from a clicked one — so
+  adding VAD later is a browser change only.
+- **Both vendor legs are live-verified.** Cartesia returned 235KB / 4.9s of
+  genuine speech (peak amplitude 32767, 100% non-silent, no `TtsError`),
+  confirming `POST /tts/bytes` + `container: "raw"`. Deepgram was proven
+  **without a microphone**, by a closed loop worth remembering as a
+  technique: Cartesia synthesized a sentence *at the socket's own 16kHz
+  input rate*, those frames were streamed into `/voice/live` in real time as
+  a browser would, and Deepgram returned the sentence verbatim — so the
+  connect query, the `Token` auth header, the `Results`/`Metadata` framing
+  and the `CloseStream` flush are all confirmed. **A synthesizer is a
+  microphone you can commit to a script.**
+- **Measured legs, warm** (turn that also calls Cal.com): Deepgram
+  finalization **299ms–1.0s** after end-of-speech, model + tool ~1.9s,
+  Cartesia **~350ms**, relay ~50ms → first audio 2.6–3.3s. A turn with no
+  tool call was ~1.3s. Three cross-continental legs from this box; only the
+  ~50ms is ours.
+- **Four fixes from the first real browser session, all of them things no
+  test had reason to look for:**
+  1. **Cartesia returns odd-length chunks** — 6 of 32 in a measured reply.
+     PCM16 is two bytes a sample, so the trailing byte was shipped as its own
+     frame, which `new Int16Array` refuses to decode (it requires an even
+     byte length). Heard as crackle. `_speak` now carries the stray byte into
+     the next chunk; live-checked at 671 frames, zero odd. **Never assume a
+     streaming audio API chunks on sample boundaries.**
+  2. **Taking the mic used to cancel a turn that was still `thinking`.** A
+     stray tap during the "let me check the diary" gap threw away an answer
+     that was ~1.7s away, and the session read as the bot ignoring the
+     question — it was asked three times. Barge-in now cancels only while
+     `speaking`: you can interrupt words you can hear, not silence. A real
+     new utterance still supersedes the old turn, at `end_utterance`.
+  3. **Typed input was never echoed back**, so a typed message vanished on
+     send while speech appeared as "you: …". The server now emits a
+     `transcript` for typed text too — one mechanism, not two that drift.
+  4. **A cancelled turn now reports `interrupted`** in its metrics and says
+     so in the UI. Silence where an answer should be is indistinguishable
+     from a bug.
+- **The mic became a switch, and the provider decides where sentences end
+  (asked for after the first real browser session).** `mic_on`/`mic_off`
+  replace push-to-talk: the STT stream stays open for the whole
+  conversation, and Deepgram's own `endpointing` (700ms) + `utterance_end_ms`
+  (1200ms) mark the end of each utterance, which `_flush_pending` turns into
+  a turn. No browser VAD and no timer anywhere — a second opinion about the
+  same audio, formed with less of it, is worse than the provider's.
+  `start_utterance`/`end_utterance` still work as aliases.
+  - **A mid-thought utterance is queued, never cancelled.** On an open mic a
+    cough or an "umm" arrives as a real utterance; cancelling a `thinking`
+    turn on one re-creates the exact "I had to ask twice" bug from the
+    previous session. Barge-in still cancels while `speaking` (words you can
+    hear, you can interrupt). Live-proven: two questions 2s apart both got
+    answered, in order, `interrupted: False` on both — the same script
+    cancelled the first answer before the fix.
+  - **Endpointing is now inside the §13 measurement**, by construction: the
+    clock starts when the speaker stops, and the provider waits
+    `DEEPGRAM_ENDPOINTING_MS` before saying so. Lowering it feels snappier
+    and starts cutting people off mid-thought; that trade is the setting.
+  - **Caps were sized for a push-to-talk tester and had to grow**: session
+    300s → 1800s, idle 60s → 300s, turns 30 → 100. An open mic holds a whole
+    conversation, so the old ceilings landed mid-chat.
+- **A message type added to `VoiceSession.handle` is inert until it is also
+  in `ClientMessage.KNOWN`** (`app/voice/protocol.py`) — the route drops
+  unknown types *before* the session sees them. `mic_on`/`mic_off` shipped
+  broken for one live run this way: every offline test calls `handle()`
+  directly and passed, while the real mic button sent a frame nothing was
+  listening for, producing total silence with no error anywhere. Guarded now
+  by `test_voice_live_socket.py::test_every_message_type_the_session_handles_survives_the_route`.
+- **Two modes for what a pause means, because one was wrong for everyone.**
+  `VOICE_UTTERANCE_MODE` (and a switch on the tester page): `instant` sends
+  on every endpoint — snappy, and it splits anyone who thinks mid-sentence,
+  so "I want to…" gets answered as its own question. `continuation` (the
+  default) treats an endpoint as *probably* done and waits
+  `VOICE_CONTINUATION_PAUSE_SECONDS` (1.5s), accumulating if more speech
+  arrives. Reported from a real session as the first half of a sentence
+  "disappearing".
+  - **The countdown must be cancelled by the provider's VAD, not by a
+    transcribed word.** The first attempt cancelled on incoming text and
+    *still split live*: Deepgram needs about a second of speech before it
+    emits anything, by which time the countdown had already fired.
+    `vad_events=true` gives `SpeechStarted` the moment sound begins, which
+    is the only signal early enough. Deferring on it is free when it turns
+    out to be nothing — the countdown restarts at the next endpoint.
+    Live-proven: "I want to" [0.8s] "book a room for tomorrow" is one turn
+    with both finals under turn 1; it was two turns before.
+  - Barge-in stays on *words*, not VAD: interrupting the bot should need
+    speech, not a cough, and the bot now stops on the first word rather than
+    at the end of the interrupting sentence.
+- **Two rendering bugs the same session exposed, both of which made a
+  working server look broken:**
+  1. **An `error` event was written into the metrics element**, and metrics
+     always arrive last — so a turn that died mid-answer overwrote its own
+     explanation and rendered as a normal turn that simply stopped talking.
+     That is the "stuck on *checking availability now*" report: the failure
+     was transient (not reproducible in 3 live attempts afterwards) and left
+     no trace anywhere, because the one place it was shown got painted over
+     ~200ms later. Errors now have their own line per turn.
+  2. **The transcript line replaced instead of accumulating.** One sentence
+     can arrive as several finals; overwriting made the earlier halves
+     vanish from the screen while the brain had heard all of them.
+  `_run_turn` also logs a WARNING when a turn ends having spoken only its
+  acknowledgement — the shape of exactly this failure, so the next one names
+  itself.
+- **The §13 clock starts at the endpoint, not at the turn.** Setting
+  `_speech_started` after the continuation pause hid that pause from the
+  number — reported latency was shorter than the silence the listener sat
+  through, and `stt_final_ms` read `0ms` on every turn (visible in a real
+  session's metrics line). It now starts when the provider says speech
+  ended, so the pause counts against the budget it actually spends.
+- **Still owed: a real browser.** No microphone has ever reached the page.
+  The AudioWorklet, the `getUserMedia` permission flow and the playback
+  scheduling are the least-tested code in this phase, and 9.1/9.2 shipped
+  three UI bugs every test passed.
+
 ## Gotchas learned the hard way
+- **`normalize_phone` hardcoded `+1` for any ten-digit number, on a product whose default
+  timezone is `Asia/Karachi`.** A caller reading out `0333333333` was stored as
+  `+10333333333` — silently, in the same config that says the business is in Pakistan, and
+  nobody can ring it back. The leading `0` is a *national trunk prefix*, not part of the
+  international number, so expanding it needs a country from somewhere: now
+  `TenantConfig.dial_code`, falling back to a small timezone→code table
+  (`app/tools/formatting.py::dial_code_for`). With no country known it returns `None`
+  rather than inventing one — `+0333333333` isn't valid E.164 (numbers never start with
+  zero) and a bare `+5551112222` claims country code 555. Three tests asserted the old US
+  behaviour and were rewritten to pass `"+1"` explicitly; that they existed is why this
+  shipped so long.
+- **"Cal.com shows 7am–10pm but the bot says the earliest is 12:30" is two settings, not a
+  bug.** `minimumBookingNotice: 120` on the event type means nothing inside two hours is
+  bookable (at 10:30 the first slot really is 12:30), and `max_slots_returned: 3` means the
+  bot reads out three of them. Opening *hours* and *bookable* slots are different things.
+  The real defect was the sentence: "the earliest we have available today is 12:30, 1, or
+  1:30" reads as "and nothing after", on a day with sixteen free slots — an operator
+  compared it against the dashboard and concluded availability was broken. The tool result
+  now appends "(N more free after these, through <last slot>. These are a SAMPLE…)".
+  Check `minimumBookingNotice` on the Cal.com event type before suspecting the schedule.
+  **Event type 6446177's notice was set to 0 (from 120) on 26 Sep 2026** by client
+  decision — "it should be very precise with availability" — via
+  `PATCH /v2/event-types/{id} {"minimumBookingNotice": 0}`, confirmed live: at 12:06 the
+  earliest offered slot moved from 14:00 to 12:30, with 13:00/13:30 correctly absent
+  because they are genuinely booked. This is an account setting, not repo config: it
+  will not travel with a redeploy and is invisible to `git`.
+- **`example.com` as the placeholder attendee email publishes a NULL MX, and Cal.com
+  started enforcing that — every booking 400s with
+  `email_domain_cannot_receive_mail`.** The setting's own comment justified it as IANA's
+  "always-resolvable" domain, which is true of its A record and false of its mail:
+  `MX 0 "."` is RFC 7505 for *this domain accepts no mail*. Not old breakage — August
+  bookings on this account went through with `caller-…@example.com` and September ones
+  don't, so the vendor tightened the check. Live-diagnosed from a real session where the
+  bot said "our booking system is experiencing a technical issue" on every attempt.
+  **Fix: set `BOOKING_PLACEHOLDER_EMAIL` to a real inbox** (used verbatim when a caller
+  gives no email); the synthesized `caller-<digits>@<domain>` form remains for operators
+  who own a catch-all domain whose MX resolves. Both providers now map that 400 to a
+  `BookingError` naming the setting, because the generic "the calendar rejected that
+  request" gave an operator nothing to act on while 100% of bookings failed. Verified by
+  a real booking pulled back from Cal.com (`cBJhn1Hnzokps4gJy9PTJZ`, accepted).
+  **A domain resolving is not a domain receiving mail — check MX, not A.**
+- **A wrong guess at a Vault key name reads exactly like a missing credential.**
+  Probing `calcom_oauth_refresh_token` returned `None` and nearly produced the confident
+  conclusion "the OAuth grant is gone"; the real key is `calcom_mcp_refresh_token`
+  (`app/mcp/oauth.py::REFRESH_TOKEN_KEY`) and the grant was fine all along. Read the
+  constant before diagnosing an absent secret.
+- **`ChannelDisabledError` subclasses `TenantNotFoundError`, so `except` ORDER is
+  load-bearing.** The subclassing is deliberate and documented (every existing
+  `except TenantNotFoundError` handler refuses cleanly with no code change — same trick as
+  `TenantArchivedError`), but it means a handler that catches the general one *first*
+  silently swallows the specific one. Hit while writing `app/channels/voice_live.py`: a
+  tenant with `channels.voice.enabled = false` reported itself as **"unknown tenant"**,
+  which sends an operator hunting for a bot that is right there in the panel. Caught by a
+  test asserting on the reason text, not the status — worth remembering that asserting
+  only "it was refused" would have passed.
+- **A `TestClient` websocket left unclosed hangs the *next* test's teardown, not its own.**
+  `client.websocket_connect(...).__enter__()` without the matching exit leaves the server
+  task alive on the portal, and the failure surfaces as an unrelated test timing out with
+  no output at all. Use a context manager (`tests/test_voice_live_socket.py::opened`), and
+  when a socket test hangs, suspect the *previous* test first.
 - **`/widget.js` must send `Cache-Control: no-cache`, never `immutable`.**
   It shipped as `public, max-age=31536000, immutable` from Phase 5 — the
   correct header for a content-hashed filename, and exactly wrong for this

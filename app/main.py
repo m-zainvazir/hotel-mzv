@@ -69,10 +69,11 @@ if sys.platform == "win32":
 
 from app import __version__
 from app.brain.graph import active_checkpointer_name, get_graph, init_postgres_checkpointer
-from app.channels import admin, chat, vapi_llm, webhooks
+from app.channels import admin, chat, vapi_llm, voice_live, webhooks
 from app.channels.ratelimit import enforce_test_session_rate_limit
 from app.channels.security import is_ops_caller
 from app.channels.test_links import verify_test_token
+from app.channels.voice_page import render_voice_tester_page
 from app.config import REPO_ROOT, get_settings
 from app.db.checkpointer import close_postgres_pool
 from app.db.factory import get_store
@@ -217,6 +218,11 @@ app.add_middleware(RequestContextMiddleware)
 app.include_router(chat.router)
 app.include_router(vapi_llm.router)
 app.include_router(webhooks.router)
+# The voice tester's WebSocket (Phase 9.3). Gated by VOICE_LIVE_ENABLED
+# inside the route rather than by conditional mounting: unlike the admin
+# router, there is no catch-all it could shadow, and a rejected handshake is
+# already indistinguishable from an unmounted path to any client.
+app.include_router(voice_live.router)
 # Always mounted, unlike a naive "only include_router when ADMIN_ENABLED" —
 # a router has no clean "un-include" once added, which matters because every
 # test in the suite shares this one `app` object. ADMIN_ENABLED=false is
@@ -508,8 +514,10 @@ async def _resolve_test_tenant(claims):
         if draft is not None:
             tenant = draft
 
+    # The channel the *link* is for, not always chat (Phase 9.3): a voice
+    # test link against a bot with chat turned off is perfectly legitimate.
     try:
-        require_channel_enabled(tenant, "chat")
+        require_channel_enabled(tenant, claims.mode)
     except ChannelDisabledError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return tenant
@@ -519,14 +527,12 @@ def _resolve_test_mode(token: str):
     claims = verify_test_token(token)
     if claims is None:
         raise HTTPException(status_code=404, detail="invalid or expired test link")
-    if claims.mode == "voice":
-        # Minted-and-rejected until Phase 9.3 (the voice tester — moved from
-        # 9.2, which plans/phase9.2.md reassigned to flows/cards). The claim
-        # shape already supports it so a link an operator hands out today
-        # doesn't need to change once the voice tester ships.
-        raise HTTPException(
-            status_code=404, detail="voice testing is not available yet (Phase 9.3)"
-        )
+    if claims.mode == "voice" and not get_settings().voice_live_enabled:
+        # The claim shape has carried `mode` since 9.1 so a link handed out
+        # before the voice tester shipped never had to change. What changed
+        # in 9.3 is that it works — except where an operator has turned the
+        # relay off deployment-wide, which stays a 404.
+        raise HTTPException(status_code=404, detail="voice testing is turned off")
     return claims
 
 
@@ -534,6 +540,12 @@ def _resolve_test_mode(token: str):
 async def test_agent_page(token: str) -> HTMLResponse:
     claims = _resolve_test_mode(token)
     tenant = await _resolve_test_tenant(claims)
+    if claims.mode == "voice":
+        # A different transport entirely (a WebSocket, not the widget's SSE),
+        # so this is its own page rather than a flag on the shared shell —
+        # but the same signed link, the same draft/live variant and the same
+        # channel gating.
+        return HTMLResponse(render_voice_tester_page(tenant.name, token, variant=claims.variant))
     return HTMLResponse(_test_agent_page(tenant.name, token, variant=claims.variant))
 
 
@@ -586,6 +598,11 @@ class TestSessionRequest(BaseModel):
 )
 async def test_session(payload: TestSessionRequest) -> chat.ChatSessionResponse:
     claims = _resolve_test_mode(payload.token)
+    if claims.mode != "chat":
+        # This is the *chat* handshake. A voice link has its own surface
+        # (`/voice/live`), and minting a chat session from one would hand a
+        # voice tester a token for the wrong channel entirely.
+        raise HTTPException(status_code=404, detail="this link is not a chat test link")
     tenant = await _resolve_test_tenant(claims)
     # No widget key at all (a tenant with an empty widget_keys[] is still
     # testable this way) and no allowed_origins check (the page is served

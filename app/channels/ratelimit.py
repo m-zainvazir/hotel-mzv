@@ -179,3 +179,23 @@ async def enforce_admin_rate_limit(request: Request) -> None:
     )
     if retry_after is not None:
         raise _too_many_requests(retry_after)
+
+
+def voice_socket_retry_after(client_host: str) -> float | None:
+    """`/voice/live` (Phase 9.3) — per-IP socket opens, in its own bucket.
+
+    Returns seconds-until-reset when over the limit, else `None`. Deliberately
+    *not* a FastAPI dependency raising `HTTPException` like every other
+    limiter here: this guards a WebSocket handshake, where there is no
+    response to attach a 429 and a `Retry-After` header to. The caller
+    refuses the socket instead.
+    """
+    settings = get_settings()
+    if not settings.rate_limit_enabled:
+        return None
+    return _hit(
+        "voice-ip",
+        client_host,
+        limit=settings.voice_sockets_per_minute,
+        window_seconds=60.0,
+    )

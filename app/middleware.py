@@ -34,6 +34,30 @@ class RequestIdFilter(logging.Filter):
         return True
 
 
+#: Paths whose *last segment is a credential*. `/test/{token}` is a signed
+#: link that grants a conversation with a tenant's bot until it expires —
+#: writing it to an access log copies it into wherever logs are shipped, on
+#: every page load. Found while building the 9.3 voice tester: that phase
+#: moved its own WebSocket token out of the query string for exactly this
+#: reason (uvicorn logs a socket's full path *with* query), and the check
+#: turned up the same leak already present on the page the socket is opened
+#: from. `/bot/{widget_key}` is deliberately NOT here — a widget key is a
+#: public identifier a client pastes into their own HTML, not a secret.
+_CREDENTIAL_PREFIXES = ("/test/",)
+
+
+def redacted_path(path: str) -> str:
+    """`/test/<token>` -> `/test/<redacted>`; everything else unchanged.
+
+    Keeps the route identifiable in logs (which is the point of an access
+    line) without keeping the secret that makes it usable.
+    """
+    for prefix in _CREDENTIAL_PREFIXES:
+        if path.startswith(prefix) and len(path) > len(prefix):
+            return f"{prefix}<redacted>"
+    return path
+
+
 class RequestContextMiddleware:
     """Accepts or generates `X-Request-Id`, echoes it back, and logs one
     access line per request with status and duration — the timing
@@ -73,7 +97,7 @@ class RequestContextMiddleware:
             logger.info(
                 "%s %s -> %s (%.1fms)",
                 scope.get("method", ""),
-                scope.get("path", ""),
+                redacted_path(scope.get("path", "")),
                 status_code,
                 duration_ms,
             )

@@ -111,3 +111,23 @@ async def test_checkpointer_failure_log_never_contains_the_database_password(mon
         assert "***" in full_text
     finally:
         reset_settings_cache()
+
+
+def test_a_test_link_token_is_never_written_to_the_access_log():
+    """`/test/{token}` is a signed link that grants a conversation with a
+    tenant's bot. Logging it copies it wherever logs are shipped, on every
+    page load — found while moving the 9.3 socket's own token out of the
+    query string, which uvicorn logs for the same reason."""
+    from app.middleware import redacted_path
+
+    assert redacted_path("/test/eyJ0aWQiOiJob3RlbC1tenYi.sig") == "/test/<redacted>"
+    assert redacted_path("/test/") == "/test/"
+
+
+def test_a_widget_key_is_still_logged_because_it_is_not_a_secret():
+    """A widget key is a public identifier a client pastes into their own
+    HTML. Redacting it would cost real debuggability for no gain."""
+    from app.middleware import redacted_path
+
+    assert redacted_path("/bot/hotel-mzv-web") == "/bot/hotel-mzv-web"
+    assert redacted_path("/chat") == "/chat"

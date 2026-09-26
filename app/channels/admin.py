@@ -31,7 +31,18 @@ import time
 from datetime import date, datetime, timedelta
 from typing import Any, Literal
 
-from fastapi import APIRouter, Body, Depends, File, Header, HTTPException, Query, UploadFile, status
+from fastapi import (
+    APIRouter,
+    Body,
+    Depends,
+    File,
+    Header,
+    HTTPException,
+    Query,
+    Request,
+    UploadFile,
+    status,
+)
 from pydantic import BaseModel, ValidationError
 
 from app.brain.prompts.system import raw_template_text, render_system_prompt
@@ -440,8 +451,38 @@ class TestLinkResponse(BaseModel):
     expires_at: int
 
 
+#: Hosts that mean "this developer's own machine". A test link opened from
+#: here has to point back here.
+_LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1", "[::1]")
+
+
+def _link_base(request: Request) -> str | None:
+    """Where a test link should point.
+
+    `PUBLIC_BASE_URL` is the right answer for a deployed panel and the wrong
+    one for a local dev box: it names the *production* origin, so clicking
+    Test Agent on `http://127.0.0.1:8000/admin` handed back a Railway URL
+    carrying a locally-signed token — a link that 404s at the far end (and
+    can't work even in principle, since the two processes sign with
+    different secrets). Reported from a dev box whose Railway deployment had
+    lapsed entirely, which is what made it obvious.
+
+    So: a panel reached over loopback builds loopback links. Anything else
+    keeps `PUBLIC_BASE_URL`, because that's the only origin a *shared* link
+    can use — the request's own host is worthless to whoever you send it to
+    when it's an internal address, and trusting the Host header in general
+    is how host-header injection gets in.
+    """
+    host = (request.url.hostname or "").lower()
+    if host in _LOOPBACK_HOSTS:
+        return str(request.base_url).rstrip("/")
+    settings = get_settings()
+    return settings.public_base_url.rstrip("/") if settings.public_base_url else None
+
+
 @router.post("/tenants/{tenant_id}/test-link")
 async def create_test_link(
+    request: Request,
     tenant_id: str,
     payload: TestLinkRequest = Body(default_factory=TestLinkRequest),
     principal: AdminPrincipal = Depends(require_tenant_access),
@@ -451,8 +492,8 @@ async def create_test_link(
     preview" is a `variant: "draft"` link's fallback-to-live behaviour at
     USE time (`app/main.py::_resolve_test_tenant`), not a mint-time error,
     since a draft could be saved *after* the link is minted."""
-    settings = get_settings()
-    if not settings.public_base_url:
+    base = _link_base(request)
+    if not base:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="PUBLIC_BASE_URL is not set — cannot build a shareable test link",
@@ -464,8 +505,8 @@ async def create_test_link(
 
     token = mint_test_token(tenant_id, mode=payload.mode, variant=payload.variant)
     return TestLinkResponse(
-        url=f"{settings.public_base_url.rstrip('/')}/test/{token}",
-        expires_at=int(time.time()) + settings.test_link_ttl_seconds,
+        url=f"{base}/test/{token}",
+        expires_at=int(time.time()) + get_settings().test_link_ttl_seconds,
     )
 
 
